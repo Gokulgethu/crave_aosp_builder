@@ -1,0 +1,218 @@
+# PixelOS Build Workflow for Poco M3 (citrus) - FIXED VERSION
+# 
+# Copyright (C) 2024 The PixelOS Project
+
+name: Build PixelOS for Poco M3
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type'
+        default: 'userdebug'
+        type: choice
+        options:
+          - userdebug
+          - user
+          - eng
+
+env:
+  DEVICE_CODENAME: citrus
+  DEVICE_NAME: "Poco M3"
+  ROM_NAME: PixelOS
+  ROM_VERSION: "15"
+  MANIFEST_URL: https://github.com/PixelOS-AOSP/manifest
+  MANIFEST_BRANCH: fifteen
+  DEVICE_TREE_URL: https://github.com/PixelOS-Devices/device_xiaomi_chime
+  DEVICE_TREE_PATH: device/xiaomi/chime
+  COMMON_TREE_URL: https://github.com/PixelOS-Devices/device_xiaomi_sm6225-common
+  COMMON_TREE_PATH: device/xiaomi/sm6225-common
+  VENDOR_URL: https://github.com/PixelOS-Devices/vendor_xiaomi_chime
+  VENDOR_PATH: vendor/xiaomi/chime
+  KERNEL_URL: https://github.com/PixelOS-Devices/kernel_xiaomi_sm6225
+  KERNEL_PATH: kernel/xiaomi/sm6225
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+      
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git git-lfs coreutils sed grep diffutils findutils \
+            gzip tar bzip2 xz-utils zip unzip \
+            build-essential gcc g++ make \
+            python3 python3-pip \
+            ccache bc bison flex \
+            libncurses5 libncurses5-dev \
+            libxml2-utils libxslt-dev \
+            zlib1g-dev libffi-dev libssl-dev \
+            cpio dpkg-dev kmod \
+            u-boot-tools pngquant schedtool \
+            lzop uuid-dev liblz4-tool \
+            repo aapt adb fastboot
+      
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ env.DEVICE_CODENAME }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ env.DEVICE_CODENAME }}-
+      
+      - name: Configure ccache
+        run: |
+          ccache -M 50G
+          ccache -z
+          echo "USE_CCACHE=1" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+      
+      - name: Initialize Repo
+        run: |
+          mkdir -p android-build
+          cd android-build
+          
+          # Configure git
+          git config --global user.email "builder@github.actions"
+          git config --global user.name "GitHub Actions Builder"
+          git config --global --bool http.postBuffer 524288000
+          git config --global fetch.fsckobjects false
+          git config --global gc.auto 0
+          
+          # Initialize repo
+          repo init -u ${{ env.MANIFEST_URL }} -b ${{ env.MANIFEST_BRANCH }} \
+            --git-lfs --depth=1 --no-tags --no-clone-bundle
+          
+          echo "✓ Repository initialized"
+      
+      - name: Clone Device Trees
+        run: |
+          cd android-build
+          
+          # Clone device tree
+          git clone --depth=1 ${{ env.DEVICE_TREE_URL }} ${{ env.DEVICE_TREE_PATH }}
+          
+          # Clone common device tree
+          git clone --depth=1 ${{ env.COMMON_TREE_URL }} ${{ env.COMMON_TREE_PATH }} || true
+          
+          # Clone vendor
+          git clone --depth=1 ${{ env.VENDOR_URL }} ${{ env.VENDOR_PATH }}
+          
+          # Clone kernel
+          git clone --depth=1 ${{ env.KERNEL_URL }} ${{ env.KERNEL_PATH }} || true
+          
+          echo "✓ Device trees cloned"
+          ls -la device/xiaomi/
+      
+      - name: Sync Sources
+        run: |
+          cd android-build
+          
+          # Sync with optimizations
+          repo sync -c -j8 --force-sync --no-clone-bundle --no-tags \
+            --optimized-fetch --prune 2>&1 | tail -20
+          
+          echo "✓ Sources synced"
+          du -sh .
+      
+      - name: Build ROM
+        id: build
+        run: |
+          cd android-build
+          
+          # Source environment
+          source build/envsetup.sh
+          
+          # Export ccache
+          export USE_CCACHE=1
+          export CCACHE_DIR=$HOME/.ccache
+          export CCACHE_EXEC=/usr/bin/ccache
+          
+          # Try different lunch targets
+          echo "Attempting to find correct lunch target..."
+          
+          # Check available makefiles
+          if [ -f "device/xiaomi/chime/pixel_citrus.mk" ]; then
+            lunch pixel_citrus-${{ inputs.build_type }}
+          elif [ -f "device/xiaomi/chime/chime.mk" ]; then
+            lunch chime-${{ inputs.build_type }}
+          else
+            # Search for any device makefile
+            find device/xiaomi/chime -name "*.mk" | head -5
+            lunch aosp_citrus-${{ inputs.build_type }} || \
+            lunch lineage_citrus-${{ inputs.build_type }} || \
+            lunch pixel_citrus-${{ inputs.build_type }}
+          fi
+          
+          echo "=== Starting Build ==="
+          make bacon -j$(nproc) 2>&1 | tee build.log
+          
+          BUILD_EXIT=${PIPESTATUS[0]}
+          
+          echo ""
+          echo "=== Build Result: $BUILD_EXIT ==="
+          
+          # Check for output
+          if ls out/target/product/*/*.zip 2>/dev/null; then
+            echo "✓ Build successful!"
+            cp out/target/product/*/*.zip ./PixelOS-${{ env.DEVICE_CODENAME }}.zip
+          else
+            echo "Checking for alternative outputs..."
+            find out -name "*.zip" 2>/dev/null | head -5
+            find out -name "*.img" 2>/dev/null | head -5
+          fi
+          
+          exit $BUILD_EXIT
+      
+      - name: Show ccache stats
+        if: always()
+        run: ccache -s 2>/dev/null || true
+      
+      - name: Upload Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixelOS-${{ env.DEVICE_CODENAME }}-ZIP
+          path: |
+            android-build/PixelOS-*.zip
+            android-build/*.zip
+            android-build/out/**/target/product/**/*.zip
+            android-build/build.log
+          retention-days: 7
+      
+      - name: Upload Logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixelOS-Build-Logs
+          path: |
+            android-build/build.log
+            android-build/out/**/*.log
+          retention-days: 30
+      
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Build Summary"
+          echo "- Device: ${{ env.DEVICE_NAME }} (${{ env.DEVICE_CODENAME }})"
+          echo "- ROM: ${{ env.ROM_NAME }} ${{ env.ROM_VERSION }}"
+          echo "- Build Type: ${{ inputs.build_type }}"
+          echo "- Status: ${{ job.status }}"
+          echo ""
+          echo "### Output Files:"
+          find android-build -name "*.zip" -o -name "*.img" 2>/dev/null | head -10
