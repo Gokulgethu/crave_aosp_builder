@@ -1,0 +1,438 @@
+name: Build LineageOS for Poco M3 (citrus)
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_branch:
+        description: 'LineageOS Manifest Branch (e.g., lineage-20.0, lineage-21.0, lineage-19.1)'
+        required: true
+        default: 'lineage-20.0'
+        type: choice
+        options:
+          - 'lineage-21.0'
+          - 'lineage-20.0'
+          - 'lineage-19.1'
+          - 'lineage-18.1'
+      device_codename:
+        description: 'Device Codename (e.g., citrus or chime)'
+        required: true
+        default: 'citrus'
+        type: string
+      build_type:
+        description: 'Build Target Type'
+        required: true
+        default: 'userdebug'
+        type: choice
+        options:
+          - 'userdebug'
+          - 'user'
+          - 'eng'
+      device_tree_url:
+        description: 'Device Tree Repository URL'
+        required: true
+        default: 'https://github.com/KiranPranay/device_xiaomi_chime'
+        type: string
+      device_tree_branch:
+        description: 'Device Tree Branch'
+        required: true
+        default: 'lineage-20.0'
+        type: string
+      device_tree_path:
+        description: 'Device Tree Path inside source (e.g., device/xiaomi/citrus or device/xiaomi/chime)'
+        required: true
+        default: 'device/xiaomi/chime'
+        type: string
+      vendor_tree_url:
+        description: 'Vendor Tree Repository URL'
+        required: true
+        default: 'https://gitlab.com/chimeoss/vendor_xiaomi_chime'
+        type: string
+      vendor_tree_branch:
+        description: 'Vendor Tree Branch'
+        required: true
+        default: 'lineage-20.0'
+        type: string
+      vendor_tree_path:
+        description: 'Vendor Tree Path inside source (e.g., vendor/xiaomi/citrus or vendor/xiaomi/chime)'
+        required: true
+        default: 'vendor/xiaomi/chime'
+        type: string
+      kernel_tree_url:
+        description: 'Kernel Tree Repository URL'
+        required: true
+        default: 'https://github.com/crdroidandroid/android_kernel_xiaomi_chime'
+        type: string
+      kernel_tree_branch:
+        description: 'Kernel Tree Branch'
+        required: true
+        default: '13.0'
+        type: string
+      kernel_tree_path:
+        description: 'Kernel Tree Path inside source'
+        required: true
+        default: 'kernel/xiaomi/chime'
+        type: string
+      use_ccache:
+        description: 'Enable CCache compilation acceleration'
+        required: false
+        default: true
+        type: boolean
+      upload_release:
+        description: 'Upload ROM zip and recovery image to GitHub Releases'
+        required: false
+        default: true
+        type: boolean
+      upload_gofile:
+        description: 'Upload ROM zip to GoFile mirror'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  GIT_TERMINAL_PROMPT: 0
+
+jobs:
+  build:
+    name: Compile LineageOS (${{ inputs.manifest_branch }}) for Poco M3 (${{ inputs.device_codename }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Workflow Repository
+        uses: actions/checkout@v4
+
+      - name: Display Initial System & Disk Status
+        run: |
+          echo "=== CPU INFO ==="
+          lscpu | grep 'Model name\|Socket\|Thread\|NUMA\|CPU(s)' || true
+          echo "=== MEMORY INFO ==="
+          free -h
+          echo "=== INITIAL DISK SPACE ==="
+          df -h
+
+      - name: Free Up Runner Disk Space
+        run: |
+          echo "::group::Cleaning unnecessary pre-installed tools and packages"
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force || true
+          sudo apt-get clean
+          sudo apt-get autoremove -y
+          echo "::endgroup::"
+          echo "=== DISK SPACE AFTER CLEANUP ==="
+          df -h
+
+      - name: Configure Linux Swap Space (12 GB)
+        run: |
+          echo "::group::Setting up 12GB Swap File"
+          sudo swapoff -a || true
+          sudo rm -f /swapfile || true
+          sudo fallocate -l 12G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=12288
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "=== SWAP CONFIGURED ==="
+          free -h
+          echo "::endgroup::"
+
+      - name: Install Android Build Dependencies
+        run: |
+          echo "::group::Installing Build Tools & Packages"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+            git git-lfs gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev libelf-dev liblz4-tool libncurses5 libncurses5-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush \
+            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
+            python3 python-is-python3 python3-pip jq pigz tree
+          
+          # Install Google Repo tool
+          sudo mkdir -p /usr/local/bin
+          sudo curl -s https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod a+rx /usr/local/bin/repo
+          echo "Repo tool installed successfully."
+          echo "::endgroup::"
+
+      - name: Configure Git Global Identity
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git config --global color.ui true
+
+      - name: Setup CCache
+        if: ${{ inputs.use_ccache }}
+        run: |
+          echo "::group::Configuring CCache"
+          mkdir -p /home/runner/.ccache
+          export CCACHE_DIR=/home/runner/.ccache
+          export USE_CCACHE=1
+          export CCACHE_EXEC=/usr/bin/ccache
+          ccache -M 35G
+          ccache -o compression=true
+          ccache -s
+          echo "CCACHE_DIR=/home/runner/.ccache" >> $GITHUB_ENV
+          echo "USE_CCACHE=1" >> $GITHUB_ENV
+          echo "CCACHE_EXEC=/usr/bin/ccache" >> $GITHUB_ENV
+          echo "::endgroup::"
+
+      - name: Initialize LineageOS ROM Source Tree
+        run: |
+          echo "::group::Initializing LineageOS Repo"
+          mkdir -p ~/android/lineage
+          cd ~/android/lineage
+          repo init -u https://github.com/LineageOS/android.git \
+            -b ${{ inputs.manifest_branch }} \
+            --git-lfs \
+            --depth=1
+          echo "::endgroup::"
+
+      - name: Clone Device, Vendor, and Kernel Trees
+        run: |
+          echo "::group::Cloning Trees for ${{ inputs.device_codename }}"
+          export GIT_TERMINAL_PROMPT=0
+          cd ~/android/lineage
+
+          # Helper function to clone or report clear error
+          clone_tree() {
+            local NAME="$1"
+            local URL="$2"
+            local BRANCH="$3"
+            local DEST="$4"
+
+            if [ -z "$URL" ]; then
+              echo "[-] Skipping $NAME (URL not provided)."
+              return 0
+            fi
+
+            echo "=========================================="
+            echo "-> Cloning $NAME"
+            echo "   URL: $URL"
+            echo "   Branch: $BRANCH"
+            echo "   Target Path: $DEST"
+            echo "=========================================="
+
+            # Test repository existence and branch accessibility
+            if ! git ls-remote --heads "$URL" "$BRANCH" > /dev/null 2>&1; then
+              echo "⚠️ WARNING: Branch '$BRANCH' not found via ls-remote or repo is private."
+              echo "Attempting clone without explicit branch check..."
+            fi
+
+            rm -rf "$DEST"
+            mkdir -p "$DEST"
+            if ! git clone --depth=1 -b "$BRANCH" "$URL" "$DEST"; then
+              echo "❌ ERROR: Failed to clone $NAME from $URL (branch: $BRANCH)."
+              echo "Please verify that the repository URL and branch name exist and are publicly accessible."
+              exit 1
+            fi
+            echo "✅ Successfully cloned $NAME into $DEST"
+          }
+
+          # 1. Device Tree
+          clone_tree "Device Tree" "${{ inputs.device_tree_url }}" "${{ inputs.device_tree_branch }}" "${{ inputs.device_tree_path }}"
+
+          # 2. Vendor Tree
+          clone_tree "Vendor Tree" "${{ inputs.vendor_tree_url }}" "${{ inputs.vendor_tree_branch }}" "${{ inputs.vendor_tree_path }}"
+
+          # 3. Kernel Tree
+          clone_tree "Kernel Tree" "${{ inputs.kernel_tree_url }}" "${{ inputs.kernel_tree_branch }}" "${{ inputs.kernel_tree_path }}"
+
+          echo "::endgroup::"
+
+      - name: Sync ROM Source Code
+        run: |
+          echo "::group::Repo Sync (LineageOS Shallow Sync)"
+          cd ~/android/lineage
+          repo sync -c -j$(nproc --all) \
+            --force-sync \
+            --no-clone-bundle \
+            --no-tags \
+            --optimized-fetch \
+            --prune
+          echo "::endgroup::"
+          echo "=== DISK SPACE AFTER SYNC ==="
+          df -h
+
+      - name: Build LineageOS ROM
+        id: build_rom
+        run: |
+          echo "::group::Starting LineageOS Compilation"
+          cd ~/android/lineage
+          
+          # Source environment
+          source build/envsetup.sh
+          
+          # Check available lunch targets for citrus / chime
+          TARGET="${{ inputs.device_codename }}"
+          LUNCH_TARGET="lineage_${TARGET}-${{ inputs.build_type }}"
+          
+          # If target not found directly, check if chime or citrus product mk exists
+          if ! lunch "$LUNCH_TARGET" 2>/dev/null; then
+            echo "Could not lunch $LUNCH_TARGET directly, trying alternative target..."
+            if [ -f "device/xiaomi/chime/lineage_chime.mk" ]; then
+              LUNCH_TARGET="lineage_chime-${{ inputs.build_type }}"
+            elif [ -f "device/xiaomi/citrus/lineage_citrus.mk" ]; then
+              LUNCH_TARGET="lineage_citrus-${{ inputs.build_type }}"
+            fi
+            echo "Lunching: $LUNCH_TARGET"
+            lunch "$LUNCH_TARGET"
+          fi
+          
+          START_TIME=$(date +%s)
+          echo "BUILD_START_TIME=$START_TIME" >> $GITHUB_ENV
+          
+          echo "Starting mka bacon..."
+          mka bacon -j$(nproc --all) 2>&1 | tee build.log
+          
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          MINUTES=$((DURATION / 60))
+          echo "BUILD_MINUTES=$MINUTES" >> $GITHUB_ENV
+          echo "Build finished in $MINUTES minutes."
+          echo "::endgroup::"
+
+      - name: Verify & Package Output Artifacts
+        if: success()
+        id: package_artifacts
+        run: |
+          echo "::group::Collecting Build Artifacts"
+          cd ~/android/lineage
+          OUT_DIR="out/target/product/${{ inputs.device_codename }}"
+          if [ ! -d "$OUT_DIR" ] && [ -d "out/target/product/chime" ]; then
+            OUT_DIR="out/target/product/chime"
+          fi
+          
+          if [ ! -d "$OUT_DIR" ]; then
+            echo "Error: Output directory not found in out/target/product!"
+            exit 1
+          fi
+          
+          mkdir -p $GITHUB_WORKSPACE/artifacts
+          
+          # Find LineageOS zip
+          ZIP_FILE=$(find "$OUT_DIR" -maxdepth 1 -name "lineage-*.zip" ! -name "*target_files*" | head -n 1)
+          if [ -n "$ZIP_FILE" ]; then
+            cp "$ZIP_FILE" $GITHUB_WORKSPACE/artifacts/
+            ZIP_NAME=$(basename "$ZIP_FILE")
+            echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+            echo "ROM Zip: $ZIP_NAME"
+          else
+            echo "Warning: lineage-*.zip not found in $OUT_DIR"
+          fi
+          
+          # Find recovery images if present
+          for img in boot.img recovery.img vendor_boot.img dtbo.img super_empty.img; do
+            if [ -f "$OUT_DIR/$img" ]; then
+              cp "$OUT_DIR/$img" $GITHUB_WORKSPACE/artifacts/
+              echo "Found image: $img"
+            fi
+          done
+          
+          # Generate SHA256 and MD5 checksums
+          cd $GITHUB_WORKSPACE/artifacts
+          sha256sum * > SHA256SUMS.txt
+          md5sum * > MD5SUMS.txt
+          
+          echo "=== COLLECTED ARTIFACTS ==="
+          ls -la $GITHUB_WORKSPACE/artifacts
+          echo "::endgroup::"
+
+      - name: Upload to GoFile Mirror
+        if: success() && inputs.upload_gofile
+        id: upload_gofile
+        run: |
+          echo "::group::Uploading to GoFile"
+          cd $GITHUB_WORKSPACE/artifacts
+          if [ -n "$ZIP_NAME" ] && [ -f "$ZIP_NAME" ]; then
+            SERVER=$(curl -s https://api.gofile.io/servers | jq -r '.data.servers[0].name' 2>/dev/null || true)
+            if [ -n "$SERVER" ] && [ "$SERVER" != "null" ]; then
+              UPLOAD_RESP=$(curl -s -F "file=@$ZIP_NAME" "https://${SERVER}.gofile.io/contents/uploadfile")
+              DOWNLOAD_PAGE=$(echo "$UPLOAD_RESP" | jq -r '.data.downloadPage' 2>/dev/null || true)
+              if [ -n "$DOWNLOAD_PAGE" ] && [ "$DOWNLOAD_PAGE" != "null" ]; then
+                echo "GOFILE_URL=$DOWNLOAD_PAGE" >> $GITHUB_ENV
+                echo "GoFile Download URL: $DOWNLOAD_PAGE"
+              fi
+            else
+              echo "GoFile server query unavailable. Skipping GoFile upload."
+            fi
+          fi
+          echo "::endgroup::"
+
+      - name: Create GitHub Release
+        if: success() && inputs.upload_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: lineage-${{ inputs.device_codename }}-${{ inputs.manifest_branch }}-${{ github.run_number }}
+          name: LineageOS ${{ inputs.manifest_branch }} for Poco M3 (${{ inputs.device_codename }}) - Build #${{ github.run_number }}
+          draft: false
+          prerelease: false
+          body: |
+            ## LineageOS Custom ROM for Poco M3 (`${{ inputs.device_codename }}`)
+            
+            - **Device:** Xiaomi POCO M3 (`citrus` / `chime`)
+            - **ROM Version:** LineageOS (`${{ inputs.manifest_branch }}`)
+            - **Build Type:** `${{ inputs.build_type }}`
+            - **Build Duration:** ${{ env.BUILD_MINUTES }} minutes
+            - **Commit SHA:** `${{ github.sha }}`
+            - **Workflow Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            ${{ env.GOFILE_URL != '' && format('- **GoFile Mirror:** {0}', env.GOFILE_URL) || '' }}
+
+            ### Flashing Instructions:
+            1. Ensure bootloader is unlocked.
+            2. Flash recommended custom recovery (`recovery.img` or `boot.img`).
+            3. Wipe `/data`, `/cache`, and `/system`.
+            4. Sideload or install `lineage-*.zip`.
+            5. (Optional) Flash compatible GApps for `${{ inputs.manifest_branch }}`.
+            6. Reboot to system.
+
+            ### File Hashes:
+            Check `SHA256SUMS.txt` and `MD5SUMS.txt` attached below.
+          files: |
+            ${{ github.workspace }}/artifacts/*
+
+      - name: Send Telegram Notification (Success)
+        if: success() && env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          MSG="🎉 *LineageOS Build Succeeded!*%0A%0A"
+          MSG+="📱 *Device:* POCO M3 (\`${{ inputs.device_codename }}\`)%0A"
+          MSG+="🌿 *Branch:* \`${{ inputs.manifest_branch }}\`%0A"
+          MSG+="⏱ *Build Duration:* ${{ env.BUILD_MINUTES }} minutes%0A"
+          MSG+="📦 *File:* \`${{ env.ZIP_NAME }}\`%0A"
+          if [ -n "${{ env.GOFILE_URL }}" ]; then
+            MSG+="🔗 *Mirror Link:* [GoFile Download](${{ env.GOFILE_URL }})%0A"
+          fi
+          MSG+="🚀 *GitHub Run:* [View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "parse_mode=Markdown" \
+            -d "text=${MSG}"
+
+      - name: Upload Build Log Tail on Failure
+        if: failure()
+        run: |
+          echo "::group::Capturing Failure Logs"
+          mkdir -p $GITHUB_WORKSPACE/logs
+          if [ -f ~/android/lineage/build.log ]; then
+            tail -n 1000 ~/android/lineage/build.log > $GITHUB_WORKSPACE/logs/build_error_tail.log
+          else
+            echo "No build.log found or build stopped before compilation." > $GITHUB_WORKSPACE/logs/build_error_tail.log
+          fi
+          echo "::endgroup::"
+
+      - name: Upload Error Logs Artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineage-build-failure-logs-${{ inputs.device_codename }}
+          path: ${{ github.workspace }}/logs/
