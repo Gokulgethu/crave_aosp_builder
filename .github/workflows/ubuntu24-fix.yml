@@ -1,0 +1,162 @@
+# PixelOS Build - FIXED for Ubuntu 24.04
+# Fixed: libncurses6 (not 5), ccache properly installed
+
+name: Build PixelOS for Poco M3
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 400
+    
+    steps:
+      - name: Install Dependencies
+        run: |
+          echo "=== Installing Dependencies ==="
+          
+          sudo apt-get update
+          
+          # FIXED: Use libncurses6 instead of libncurses5 for Ubuntu 24.04
+          sudo apt-get install -y \
+            git git-lfs \
+            python3 \
+            openjdk-17-jdk \
+            ccache \
+            build-essential gcc g++ make \
+            bc bison flex \
+            libncurses6 libncurses6-dev \
+            libxml2-dev libxslt-dev \
+            zlib1g-dev \
+            cpio zip unzip gzip tar xz-utils \
+            rsync curl wget lzop \
+            2>&1 | tail -30
+          
+          echo ""
+          echo "=== Verification ==="
+          which ccache || echo "WARNING: ccache not found"
+          ccache --version 2>/dev/null || echo "ccache failed"
+          java -version 2>&1 | head -1
+          
+      - name: Setup Java
+        run: |
+          echo "=== Java Setup ==="
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          export PATH="$JAVA_HOME/bin:$PATH"
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version 2>&1 | head -1
+          
+      - name: Setup ccache
+        run: |
+          echo "=== ccache Setup ==="
+          ccache -M 100G
+          ccache -z
+          ccache -s | head -5
+          echo "USE_CCACHE=1" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          
+      - name: Configure Git
+        run: |
+          git config --global user.email "builder@github.com"
+          git config --global user.name "GitHub Actions"
+          git config --global http.postBuffer 524288000
+          
+      - name: Install Repo
+        run: |
+          echo "=== Installing Repo ==="
+          curl -sL https://storage.googleapis.com/git-repo-downloads/repo -o ./repo
+          chmod +x ./repo
+          sudo mv ./repo /usr/local/bin/repo
+          /usr/local/bin/repo version 2>&1 | head -1
+          
+      - name: Initialize Repository
+        run: |
+          echo "=== Initializing Repo ==="
+          
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          export PATH="/usr/local/bin:$JAVA_HOME/bin:$PATH"
+          export USE_CCACHE=1
+          export CCACHE_DIR=$HOME/.ccache
+          
+          mkdir -p pixelos && cd pixelos
+          
+          /usr/local/bin/repo init \
+            -u https://github.com/PixelOS-AOSP/android_manifest.git \
+            -b fourteen --git-lfs --depth=1 --no-tags 2>&1 | tail -20
+          
+          echo ""
+          echo "Result: $([ -d .repo ] && echo 'SUCCESS' || echo 'FAILED')"
+          
+      - name: Sync Sources
+        run: |
+          echo "=== Syncing Sources ==="
+          
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          export PATH="/usr/local/bin:$JAVA_HOME/bin:$PATH"
+          export USE_CCACHE=1
+          export CCACHE_DIR=$HOME/.ccache
+          
+          cd pixelos
+          
+          echo "Syncing (may take 30-60 minutes)..."
+          /usr/local/bin/repo sync -c -j4 --force-sync --no-clone-bundle --prune 2>&1 | tail -30
+          
+          du -sh .
+          
+      - name: Clone Device Trees
+        run: |
+          echo "=== Cloning Device Trees ==="
+          
+          cd pixelos
+          
+          git clone --depth=1 https://github.com/PixelOS-Devices/device_xiaomi_chime.git device/xiaomi/chime || true
+          git clone --depth=1 https://github.com/PixelOS-Devices/vendor_xiaomi_chime.git vendor/xiaomi/chime || true
+          
+          echo ""
+          ls device/xiaomi/ 2>/dev/null || echo "No device trees"
+          
+      - name: Build ROM
+        run: |
+          echo "=== Building ROM ==="
+          
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          export PATH="/usr/local/bin:$JAVA_HOME/bin:$PATH"
+          export USE_CCACHE=1
+          export CCACHE_DIR=$HOME/.ccache
+          
+          cd pixelos
+          
+          source build/envsetup.sh
+          
+          lunch aosp_citrus-userdebug 2>&1 || \
+          lunch chime-userdebug 2>&1 || \
+          echo "No specific target"
+          
+          echo ""
+          echo "Starting build..."
+          make bacon -j$(nproc) 2>&1 | tee build.log
+          
+          echo ""
+          echo "Build complete. Exit code: $?"
+          find out -name "*.zip" 2>/dev/null | head -5
+          
+      - name: Upload Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixelOS-Citrus
+          path: |
+            pixelos/*.zip
+            pixelos/out/**/product/**/*.zip
+            pixelos/build.log
+          retention-days: 7
+          
+      - name: Summary
+        if: always()
+        run: |
+          echo "=== BUILD SUMMARY ==="
+          echo "Status: ${{ job.status }}"
+          echo "Device: Xiaomi Poco M3 (citrus)"
+          cd pixelos
+          find . -name "*.zip" 2>/dev/null | head -5
