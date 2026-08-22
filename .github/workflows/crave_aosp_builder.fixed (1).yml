@@ -1,0 +1,139 @@
+# Fixed workflow — builds crDroid Android 16.0 for Xiaomi chime (citrus / lime)
+#
+# WHY THIS CHANGE:
+#   The old run failed because:
+#     1. PixelOS-AOSP/android_manifest no longer has a `fourteen` branch
+#        (only sixteen / sixteen-qpr1 / sixteen-qpr2 / seventeen remain).
+#     2. PixelOS dropped chime entirely: PixelOS-Devices/device_xiaomi_chime
+#        and vendor_xiaomi_chime are deleted (the "could not read Username"
+#        errors were GitHub 404s), and chime is absent from current manifests.
+#   crDroid still maintains chime on branch 16.0:
+#     device tree:  crdroidandroid/android_device_xiaomi_chime   (16.0)
+#     lunch target: lineage_chime-userdebug (from AndroidProducts.mk)
+#
+# Also fixed vs. the old workflow:
+#   - repo init/sync failures are no longer hidden by `| tail` (pipefail)
+#   - real success check instead of `[ -d .repo ]` (false SUCCESS before)
+#   - device/kernel/vendor pulled via local_manifests instead of `|| true` clones
+#   - disk-space cleanup step (a full AOSP tree does not fit otherwise)
+
+name: Build crDroid 16 (chime)
+
+on:
+  workflow_dispatch:
+  # watch_branches/triggers from the original file can be re-added here
+
+env:
+  MANIFEST_URL: https://github.com/crdroidandroid/android.git
+  MANIFEST_BRANCH: "16.0"
+  LUNCH_TARGET: lineage_chime-userdebug
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # ---------------------------------------------------------------
+      # A full AOSP sync+build needs 200GB+; a stock runner does NOT have
+      # that. This cleanup buys ~30GB, which is still not enough for a
+      # full build — use a large runner / self-hosted agent / Crave for
+      # the actual `make bacon`. It IS enough to validate init/sync.
+      # ---------------------------------------------------------------
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                       /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -a -f >/dev/null 2>&1 || true
+          sudo apt-get remove -y '^ghc-.*' '^dotnet-.*' '^llvm-.*' '^mongodb-.*' || true
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            git git-lfs curl wget \
+            python3 openjdk-17-jdk \
+            build-essential gcc g++ make bc bison flex \
+            libncurses-dev libxml2-dev libxslt1-dev zlib1g-dev \
+            cpio zip unzip gzip tar xz-utils rsync lzop ccache
+          sudo curl -sL https://storage.googleapis.com/git-repo-downloads/repo \
+               -o /usr/local/bin/repo
+          sudo chmod +x /usr/local/bin/repo
+          java -version 2>&1 | head -1
+          ccache -M 100G || true
+
+      - name: Configure git
+        run: |
+          git config --global user.email "builder@github.com"
+          git config --global user.name "GitHub Actions"
+          git config --global http.postBuffer 524288000
+
+      - name: Set environment
+        run: |
+          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> "$GITHUB_ENV"
+          echo "USE_CCACHE=1" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------------
+      # repo init + local_manifests (device tree + its declared deps:
+      # kernel, hardware/xiaomi, vendor, dolby — from crdroid.dependencies)
+      # ---------------------------------------------------------------
+      - name: Repo init
+        run: |
+          set -o pipefail
+          mkdir -p rom && cd rom
+          repo init \
+            -u "$MANIFEST_URL" \
+            -b "$MANIFEST_BRANCH" --git-lfs --depth=1 2>&1 | tail -15
+
+          mkdir -p .repo/local_manifests
+          cat > .repo/local_manifests/chime.xml <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <project name="crdroidandroid/android_device_xiaomi_chime"  path="device/xiaomi/chime"  remote="github" revision="16.0" />
+            <project name="crdroidandroid/android_kernel_xiaomi_chime"  path="kernel/xiaomi/chime"  remote="github" revision="16.0" />
+            <project name="crdroidandroid/android_vendor_xiaomi_chime"  path="vendor/xiaomi/chime"  remote="github" revision="16.0" />
+            <project name="crdroidandroid/android_hardware_xiaomi"      path="hardware/xiaomi"      remote="github" revision="16.0" />
+            <project name="crdroidandroid/android_hardware_dolby"       path="hardware/dolby"       remote="github" revision="16.0-redwood" />
+          </manifest>
+          EOF
+
+          # REAL success check (the old `[ -d .repo ]` was a false positive)
+          test -f .repo/manifest.xml || { echo "::error::repo init failed"; exit 1; }
+          echo "Init: SUCCESS"
+
+      - name: Repo sync
+        run: |
+          set -o pipefail
+          cd rom
+          repo sync -c -j4 --force-sync --no-clone-bundle 2>&1 | tail -20
+          # fail loudly if the device tree didn't come down
+          test -d device/xiaomi/chime || { echo "::error::chime device tree missing after sync"; exit 1; }
+
+      - name: Build
+        run: |
+          set -o pipefail
+          cd rom
+          export USE_CCACHE=1
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          export PATH="/usr/local/bin:$JAVA_HOME/bin:$PATH"
+
+          source build/envsetup.sh
+          lunch "$LUNCH_TARGET"
+          make bacon -j"$(nproc)" 2>&1 | tee build.log
+
+          find out -name "*.zip" 2>/dev/null | head -5
+
+      - name: Upload ROM
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crdroid-16.0-chime
+          path: rom/out/target/product/chime/*.zip
+          if-no-files-found: warn
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: rom/build.log
+          if-no-files-found: ignore
