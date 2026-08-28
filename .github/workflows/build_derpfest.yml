@@ -1,0 +1,146 @@
+name: Build DerpFest for OnePlus 11R (udon)
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_branch:
+        description: 'DerpFest Manifest Branch'
+        required: true
+        default: '15.2'
+        type: choice
+        options: ['15.2', '15', '14', '14-qpr2']
+      build_type:
+        description: 'Build Type'
+        required: true
+        default: 'userdebug'
+        type: choice
+        options: ['userdebug', 'user', 'eng']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: derpfest-udon-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build DerpFest (OnePlus 11R / udon)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 480
+    steps:
+      - name: System Environment Specs
+        run: |
+          echo "=== CPU Specs ==="
+          lscpu | grep "Model name\|CPU(s):"
+          echo "=== Memory Specs ==="
+          free -h
+          echo "=== Disk Space ==="
+          df -h /
+
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          df -h /
+
+      - name: Install Build Dependencies & Repo Tool
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison build-essential ccache curl flex g++-multilib \
+            gcc-multilib git git-lfs gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev libelf-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev \
+            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
+            xsltproc zip zlib1g-dev python3 python-is-python3
+          
+          mkdir -p "$HOME/bin"
+          curl https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Git Global Configuration
+        run: |
+          git config --global user.name "The LineageOS Project"
+          git config --global user.email "dev@lineageos.org"
+          git config --global color.ui false
+
+      - name: Initialize DerpFest Manifest (${{ inputs.manifest_branch }})
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/android"
+          cd "$GITHUB_WORKSPACE/android"
+          repo init -u https://github.com/DerpFest-AOSP/manifest.git -b ${{ inputs.manifest_branch }} --git-lfs --depth=1
+
+      - name: Inject OnePlus 11R Local Manifests
+        run: |
+          cd "$GITHUB_WORKSPACE/android"
+          rm -rf .repo/local_manifests
+          git clone https://github.com/Gokulgethu/local_manifests.git .repo/local_manifests -b main
+          cat .repo/local_manifests/udon.xml
+
+      - name: Synchronize Android Source Tree
+        run: |
+          cd "$GITHUB_WORKSPACE/android"
+          repo sync -c -j"$(nproc --all)" --force-sync --no-clone-bundle --no-tags --optimized-fetch --prune
+
+      - name: Setup Build Environment & Lunch Target
+        run: |
+          cd "$GITHUB_WORKSPACE/android"
+          export BUILD_USERNAME=DerpFestBuilder
+          export BUILD_HOSTNAME=crave-foss
+          source build/envsetup.sh
+          lunch derp_udon-${{ inputs.build_type }} || lunch derp_udon-userdebug
+
+      - name: Compile DerpFest ROM
+        run: |
+          cd "$GITHUB_WORKSPACE/android"
+          mka derp -j"$(nproc --all)" 2>&1 | tee build.log || m derp -j"$(nproc --all)" 2>&1 | tee build.log || mka bacon -j"$(nproc --all)" 2>&1 | tee build.log
+
+      - name: Verify Output Files
+        if: always()
+        run: |
+          cd "$GITHUB_WORKSPACE/android"
+          ls -lh out/target/product/udon/*.zip 2>/dev/null || true
+          ls -lh out/target/product/udon/boot.img 2>/dev/null || true
+
+      - name: Upload Build Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DerpFest-udon-${{ github.run_number }}
+          path: |
+            android/out/target/product/udon/DerpFest-*.zip
+            android/out/target/product/udon/boot.img
+            android/out/target/product/udon/recovery.img
+            android/out/target/product/udon/vendor_boot.img
+            android/out/target/product/udon/dtbo.img
+            android/build.log
+          if-no-files-found: warn
+
+      - name: Publish GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: DerpFest-udon-${{ inputs.manifest_branch }}-${{ github.run_number }}
+          name: DerpFest ${{ inputs.manifest_branch }} for OnePlus 11R (${{ inputs.build_type }})
+          body: |
+            ## 🍭 DerpFest for OnePlus 11R 5G (`udon` / `aston` / `CPH2487`)
+
+            ### Specifications:
+            - **Device**: OnePlus 11R 5G (`CPH2487` / `udon` / `aston`)
+            - **SoC**: Qualcomm Snapdragon 8+ Gen 1 (`SM8475`)
+            - **Base**: DerpFest AOSP (${{ inputs.manifest_branch }})
+            - **Device Tree**: [`Gokulgethu/android_device_oneplus_udon`](https://github.com/Gokulgethu/android_device_oneplus_udon)
+            - **Vendor Tree**: [`Gokulgethu/android_vendor_oneplus_udon`](https://github.com/Gokulgethu/android_vendor_oneplus_udon)
+            - **Hardware Additions**: Sony IMX890 Camera HAL & 100W SuperVOOC fast charging
+
+            ### 📦 Flashing:
+            Flash in OrangeFox Recovery / TWRP:
+            ```bash
+            adb sideload DerpFest-*.zip
+            ```
+          files: |
+            android/out/target/product/udon/DerpFest-*.zip
+            android/out/target/product/udon/boot.img
+            android/out/target/product/udon/recovery.img
+            android/out/target/product/udon/vendor_boot.img
+          make_latest: true
