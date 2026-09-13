@@ -66,6 +66,20 @@ jobs:
         run: |
           cd /home/user/crave-build/PixelOS16-udon
           export CRAVE_HOME=${HOME}
-          echo "waiting for the rebuild (299692) to start running on b5b1abe, then exec-ing the pull-out inside it..."
-          timeout 19800 crave exec --current-job "$(cat ${GITHUB_WORKSPACE}/rescue.sh)"
-          echo "EXEC_DONE - links above"
+          TOKEN=$(python3 -c "import json;print(json.load(open('$HOME/crave.conf'))['headers']['Authorization'])")
+          echo "polling until the rebuild (299692) is RUNNING on b5b1abe (no jobs submitted)..."
+          ST=""
+          for i in $(seq 1 275); do
+            ST=$(curl -s -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d '{"jobId":299692}' https://foss.crave.io/api/job/v1/get | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['status'])" 2>/dev/null || echo err)
+            echo "[$(date -u +%H:%M:%S)] rebuild 299692: $ST"
+            [ "$ST" = "running" ] && break
+            if [ "$ST" = "done" ]; then echo "rebuild finished - its own log has the upload links"; break; fi
+            sleep 60
+          done
+          if [ "$ST" = "running" ]; then
+            echo "=== rebuild is RUNNING - exec-ing the pull-out inside it ==="
+            timeout 3600 crave exec --current-job --label "rom-pullout-${GITHUB_RUN_ID}" "$(cat ${GITHUB_WORKSPACE}/rescue.sh)"
+            echo "EXEC_DONE - links above"
+          else
+            echo "no running window captured (state: $ST) - re-dispatch this workflow"
+          fi
