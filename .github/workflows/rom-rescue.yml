@@ -1,0 +1,127 @@
+name: ROM Rescue (b5b1abe)
+
+on: workflow_dispatch
+
+jobs:
+  rescue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up b5b1abe workspace identity (hostname + anchor)
+        run: |
+          sudo hostname e2b.local
+          grep -q "e2b.local" /etc/hosts || echo "127.0.0.1 e2b.local" | sudo tee -a /etc/hosts
+          echo "hostname now: $(hostname)"
+          sudo mkdir -p /home/user
+          sudo chown -R $(id -un):$(id -gn) /home/user
+          mkdir -p /home/user/crave-build/PixelOS16-udon
+          cd /home/user/crave-build/PixelOS16-udon
+          git init -q -b seventeen
+          git remote add origin https://github.com/PixelOS-AOSP/android_manifest.git
+          git config user.name "Gokulgethu"
+          git config user.email "gokulgethu30@gmail.com"
+          git commit -q --allow-empty -m "PixelOS 16 udon anchor"
+          echo "anchor: $(git branch --show-current) @ $(git rev-parse --short HEAD)"
+
+      - name: Install crave CLI (0.2-7226 - same version as the successful build)
+        run: |
+          curl -sL -o /tmp/crave https://github.com/accupara/crave/releases/download/0.2-7226/crave-0.2-7226-linux-amd64.bin
+          chmod +x /tmp/crave
+          sudo mv /tmp/crave /usr/local/bin/crave
+          crave version
+
+      - name: Configure crave
+        run: |
+          cat > ${HOME}/crave.conf <<CONFEOF
+          {
+            "username": "${CRAVE_USERNAME}",
+            "headers": {
+              "Content-Type": "application/json",
+              "Authorization": "${CRAVE_TOKEN}",
+              "User-Agent": "Crave"
+            },
+            "projects": [],
+            "server": "https://foss.crave.io/api"
+          }
+          CONFEOF
+          echo "crave.conf written ($(wc -c < ${HOME}/crave.conf) bytes)"
+        env:
+          CRAVE_USERNAME: ${{ secrets.CRAVE_USERNAME }}
+          CRAVE_TOKEN: ${{ secrets.CRAVE_TOKEN }}
+
+      - name: Submit ROM pull-out job on b5b1abe (temp.sh + gofile upload)
+        run: |
+          cat > /tmp/rescue.sh <<'RESCUE_EOF'
+# PixelOS udon ROM rescue — pull the zip built by job 299487 out of this workspace
+# (temp.sh primary, gofile backup). Read-only on the workspace; uploads only.
+set +e
+echo "=== workspace state ==="
+df -h /tmp | tail -1
+ls /tmp/src/android/ 2>/dev/null | head -15
+P=/tmp/src/android/out/target/product/udon
+echo "=== looking for ROM in $P ==="
+ls -la $P/ 2>&1 | head -40
+ZIP=$(ls -t $P/PixelOS_*.zip $P/pixelos_*.zip $P/*udon*.zip 2>/dev/null | head -1)
+if [ -z "$ZIP" ]; then
+  echo "NO_ZIP_IN_PRIMARY - searching wider (any zip >500MB in workspace)"
+  ZIP=$(find /tmp/src/android -maxdepth 6 -name '*.zip' -size +500M 2>/dev/null | head -1)
+fi
+if [ -z "$ZIP" ]; then
+  echo "RESULT: NO ROM ZIP FOUND in this workspace"
+  ls -la /tmp/src/android/out/target/product/ 2>&1 | head -10
+  exit 3
+fi
+SZ=$(stat -c%s "$ZIP")
+echo "ROM FOUND: $ZIP ($SZ bytes)"
+[ "$SZ" -gt 1000000000 ] || { echo "zip too small ($SZ) - not the ROM, aborting"; exit 4; }
+md5sum "$ZIP"
+cd "$(dirname "$ZIP")"
+ZF=$(basename "$ZIP")
+echo "=== upload 1/2: temp.sh ==="
+R=$(curl -sS --max-time 2400 -F "file=@$ZF" https://temp.sh/upload 2>&1)
+echo "temp.sh response: $R"
+echo "$R" | grep -oE 'https://temp\.sh/[A-Za-z0-9/.]+' | head -1
+echo "=== upload 2/2: gofile (backup link) ==="
+SRVS=$(curl -s --max-time 30 https://api.gofile.io/servers | grep -oE '"name":"[^"]+"' | cut -d'"' -f4)
+echo "gofile servers: $SRVS"
+for S in $SRVS; do
+  R=$(curl -sS --max-time 2400 -F "file=@$ZF" "https://$S.gofile.io/contents/uploadfile" 2>&1)
+  L=$(echo "$R" | grep -oE '"downloadPage":"[^"]+"' | cut -d'"' -f4)
+  if [ -n "$L" ]; then echo "GOFILE_LINK: $L"; break; fi
+  echo "gofile $S failed: $(echo "$R" | head -c 150)"
+done
+echo "=== rescue complete ==="
+exit 0
+RESCUE_EOF
+          cd /home/user/crave-build/PixelOS16-udon
+          export CRAVE_HOME=${HOME}
+          set -o pipefail
+          crave run --detached --no-patch --artifacts "out/target/product/udon/*.zip" "$(cat /tmp/rescue.sh)" 2>&1 | tee /tmp/submit.log | tail -4
+          JOBID=$(grep -oE 'build/info/[0-9]+' /tmp/submit.log | head -1 | grep -oE '[0-9]+')
+          if [ -z "$JOBID" ]; then echo "FATAL: no job id in submit output"; tail -20 /tmp/submit.log; exit 1; fi
+          echo "JOB_ID=$JOBID" >> "$GITHUB_ENV"
+          echo "ROM pull-out job submitted: $JOBID"
+
+      - name: Report workspace identity (informational only)
+        run: |
+          TOKEN=$(python3 -c "import json;print(json.load(open('$HOME/crave.conf'))['headers']['Authorization'])")
+          for i in 1 2 3 4 5 6; do
+            R=$(curl -s -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d "{\"jobId\":${JOB_ID}}" https://foss.crave.io/api/job/v1/get)
+            if echo "$R" | python3 -c "import json,sys; sys.exit(0 if json.load(sys.stdin).get('data') else 1)" 2>/dev/null; then
+              echo "$R" | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)['data']
+          ws=json.loads(d['workspace'])
+          print('JOB', d['jobId'], '| status:', d['status'])
+          print('buildDir:', d['buildDir'])
+          print('branchSig:', ws.get('branchSig'))
+          print('MATCH_B5B1ABE:', d['buildDir'].startswith('b5b1abe01bb9'))
+          "
+              exit 0
+            fi
+            echo "attempt $i: job record not readable yet, retrying in 10s..."; sleep 10
+          done
+          echo "NOTE: verify from client side (job ${JOB_ID})"
