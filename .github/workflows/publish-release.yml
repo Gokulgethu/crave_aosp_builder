@@ -1,0 +1,59 @@
+name: Publish ROM to GitHub Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: 'Direct URL of the ROM zip (temp.sh link or gofile direct link)'
+        required: true
+      md5:
+        description: 'Expected MD5 (optional, for verification)'
+        required: false
+      tag:
+        description: 'Release tag name'
+        required: false
+        default: 'pixelos-udon-a16'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Download ROM
+        run: |
+          curl -L --retry 5 --retry-delay 10 -o rom.zip "${{ github.event.inputs.rom_url }}"
+          ls -la rom.zip
+          if [ -n "${{ github.event.inputs.md5 }}" ]; then
+            echo "${{ github.event.inputs.md5 }}  rom.zip" | md5sum -c - || echo "WARN: md5 mismatch"
+          fi
+
+      - name: Split into 2GB parts (GitHub asset cap)
+        run: |
+          split -b 1900M -d rom.zip pixelos_udon_zip.part.
+          ls -la pixelos_udon_zip.part.*
+          md5sum pixelos_udon_zip.part.* > parts.md5
+
+      - name: Create release with parts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: PixelOS 16 QPR2 udon (OnePlus 11R)
+          body: |
+            PixelOS sixteen-qpr2 - custom_udon-ota.zip - OnePlus 11R (udon / CPH2487)
+
+            **Rejoin and flash:**
+            ```
+            cat pixelos_udon_zip.part.* > custom_udon-ota.zip
+            md5sum -c parts.md5
+            ```
+
+            Mirror: ${{ github.event.inputs.rom_url }}
+            MD5: ${{ github.event.inputs.md5 }}
+          files: |
+            pixelos_udon_zip.part.*
+            parts.md5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
