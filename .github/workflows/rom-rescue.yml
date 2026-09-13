@@ -1,11 +1,11 @@
-name: ROM Rescue (b5b1abe)
+name: ROM Pull-out (exec into running build, no new jobs)
 
 on: workflow_dispatch
 
 jobs:
   rescue:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 350
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,41 +47,25 @@ jobs:
             "server": "https://foss.crave.io/api"
           }
           CONFEOF
-          echo "crave.conf written ($(wc -c < ${HOME}/crave.conf) bytes)"
-          if grep -q '\${' ${HOME}/crave.conf; then echo "FATAL: unsubstituted placeholders in crave.conf"; cat ${HOME}/crave.conf; exit 1; fi
+          if grep -q '\${' ${HOME}/crave.conf; then echo "FATAL: unsubstituted placeholders"; exit 1; fi
           python3 -c "import json; json.load(open('${HOME}/crave.conf'))" && echo "crave.conf JSON valid"
         env:
           CRAVE_USERNAME: ${{ secrets.CRAVE_USERNAME }}
           CRAVE_TOKEN: ${{ secrets.CRAVE_TOKEN }}
 
-      - name: Submit ROM pull-out job on b5b1abe (temp.sh + gofile upload)
+      - name: Report rebuild job state
+        run: |
+          TOKEN=$(python3 -c "import json;print(json.load(open('$HOME/crave.conf'))['headers']['Authorization'])")
+          curl -s -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d '{"jobId":299692}' https://foss.crave.io/api/job/v1/get | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)['data']
+          print('rebuild job 299692:', d['status'])
+          "
+
+      - name: Wait for the running build on b5b1abe and exec the pull-out inside it (NO new jobs)
         run: |
           cd /home/user/crave-build/PixelOS16-udon
           export CRAVE_HOME=${HOME}
-          set -o pipefail
-          crave run --detached --no-patch --artifacts "out/target/product/udon/*.zip" "$(cat ${GITHUB_WORKSPACE}/rescue.sh)" 2>&1 | tee /tmp/submit.log | tail -4
-          JOBID=$(grep -oE 'build/info/[0-9]+' /tmp/submit.log | head -1 | grep -oE '[0-9]+')
-          if [ -z "$JOBID" ]; then echo "FATAL: no job id in submit output"; tail -20 /tmp/submit.log; exit 1; fi
-          echo "JOB_ID=$JOBID" >> "$GITHUB_ENV"
-          echo "ROM pull-out job submitted: $JOBID"
-
-      - name: Report workspace identity (informational only)
-        run: |
-          TOKEN=$(python3 -c "import json;print(json.load(open('$HOME/crave.conf'))['headers']['Authorization'])")
-          for i in 1 2 3 4 5 6; do
-            R=$(curl -s -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d "{\"jobId\":${JOB_ID}}" https://foss.crave.io/api/job/v1/get)
-            if echo "$R" | python3 -c "import json,sys; sys.exit(0 if json.load(sys.stdin).get('data') else 1)" 2>/dev/null; then
-              echo "$R" | python3 -c "
-          import json,sys
-          d=json.load(sys.stdin)['data']
-          ws=json.loads(d['workspace'])
-          print('JOB', d['jobId'], '| status:', d['status'])
-          print('buildDir:', d['buildDir'])
-          print('branchSig:', ws.get('branchSig'))
-          print('MATCH_B5B1ABE:', d['buildDir'].startswith('b5b1abe01bb9'))
-          "
-              exit 0
-            fi
-            echo "attempt $i: job record not readable yet, retrying in 10s..."; sleep 10
-          done
-          echo "NOTE: verify from client side (job ${JOB_ID})"
+          echo "waiting for the rebuild (299692) to start running on b5b1abe, then exec-ing the pull-out inside it..."
+          timeout 19800 crave exec --current-job "$(cat ${GITHUB_WORKSPACE}/rescue.sh)"
+          echo "EXEC_DONE - links above"
