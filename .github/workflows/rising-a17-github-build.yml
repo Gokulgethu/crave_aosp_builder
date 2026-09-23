@@ -49,7 +49,7 @@ jobs:
       - name: Sync with disk-wall detection
         run: |
           cd $HOME/rising
-          (repo sync -c --depth=1 -j4 --no-tags --no-clone-bundle --optimized-fetch > /tmp/sync.log 2>&1; echo $? > /tmp/sync.rc) &
+          (repo sync -c -j4 --no-tags --no-clone-bundle --optimized-fetch > /tmp/sync.log 2>&1; echo $? > /tmp/sync.rc) &
           SPID=$!
           while kill -0 $SPID 2>/dev/null; do
             sleep 120
