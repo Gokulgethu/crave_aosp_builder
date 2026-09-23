@@ -52,15 +52,16 @@ jobs:
           (repo sync -c -j4 --no-tags --no-clone-bundle --optimized-fetch > /tmp/sync.log 2>&1; echo $? > /tmp/sync.rc) &
           SPID=$!
           while kill -0 $SPID 2>/dev/null; do
-            sleep 120
+            sleep 30
             FREE=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
             TREE=$(du -sBG $HOME/rising 2>/dev/null | cut -f1 | tr -dc '0-9')
             echo "[checkpoint] tree=${TREE}G free=${FREE}G"
-            if [ "$FREE" -lt 4 ]; then
+            if [ "$FREE" -lt 12 ]; then
               echo "===================================================="
               echo "WALL_HIT: GitHub free server disk exhausted."
-              echo "tree reached ${TREE}G with only ${FREE}G free - the A17"
-              echo "source alone needs 50-70GB. out/ would need 50-150GB more."
+              echo "tree reached ${TREE}G with only ${FREE}G free - even the A17"
+              echo "SOURCE SYNC alone overflows the ~87GB usable disk (packs +"
+              echo "unpacked objects + LFS). out/ would need 50-150GB more."
               echo "Conclusion: full ROM build is impossible on free runners;"
               echo "the crave build (job 301681) is the real one."
               echo "===================================================="
