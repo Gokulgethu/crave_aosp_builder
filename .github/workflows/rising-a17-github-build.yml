@@ -74,7 +74,7 @@ jobs:
           echo "sync finished rc=$RC; tree=$(du -sBG $HOME/rising | cut -f1), free=$(df -BG --output=avail / | tail -1)"
           if [ "$RC" != "0" ]; then tail -20 /tmp/sync.log; echo "SYNC FAILED on GitHub free server"; exit 1; fi
 
-      - name: If the tree fit - attempt the build (expected: out/ will not fit)
+      - name: "If the tree fit - attempt the build (out/ expected not to fit)"
         if: success()
         run: |
           cd $HOME/rising
