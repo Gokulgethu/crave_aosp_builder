@@ -1,0 +1,84 @@
+name: RisingOS A17 udon - GitHub free server attempt
+
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: What GitHub's free server gives us
+        run: |
+          echo "CPUs: $(nproc)"
+          free -h | head -2
+          df -h / /mnt 2>/dev/null
+          echo "NOTE: a depth-1 A17 tree needs ~50-70GB + out/ needs 50-150GB more."
+
+      - name: Install repo tool
+        run: |
+          sudo curl -sL https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod +x /usr/local/bin/repo
+          git config --global user.name "Gokulgethu"
+          git config --global user.email "gokulgethu30@gmail.com"
+
+      - name: repo init (depth-1) + local manifests
+        run: |
+          mkdir -p $HOME/rising && cd $HOME/rising
+          repo init -u https://github.com/RisingOS-Revived/android -b seventeen --depth=1 --git-lfs
+          git clone --depth 1 https://github.com/Gokulgethu/local_manifests .repo/local_manifests
+          cat > .repo/local_manifests/zzz-udon-fixes.xml <<'FIXEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <remote name="evo-gh" fetch="https://github.com/Evolution-X" />
+            <remove-project path="vendor/gms" />
+            <project path="vendor/gms" name="vendor_gms" remote="evo-gh" revision="refs/heads/cnb" clone-depth="1" />
+            <remote name="rising-gh" fetch="https://github.com/RisingOS-Revived" />
+            <remove-project path="build/soong" />
+            <project path="build/soong" name="android_build_soong" remote="rising-gh" revision="refs/heads/seventeen" />
+            <remote name="los-gh" fetch="https://github.com/LineageOS" />
+            <project path="prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9"
+                     name="android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9"
+                     remote="los-gh" clone-depth="1" />
+            <project path="prebuilts/gcc/linux-x86/x86/x86_64-linux-android-4.9"
+                     name="android_prebuilts_gcc_linux-x86_x86_x86_64-linux-android-4.9"
+                     remote="los-gh" clone-depth="1" />
+          </manifest>
+          FIXEOF
+          echo "init OK"
+
+      - name: Sync with disk-wall detection
+        run: |
+          cd $HOME/rising
+          (repo sync -c --depth=1 -j4 --no-tags --no-clone-bundle --optimized-fetch > /tmp/sync.log 2>&1; echo $? > /tmp/sync.rc) &
+          SPID=$!
+          while kill -0 $SPID 2>/dev/null; do
+            sleep 120
+            FREE=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+            TREE=$(du -sBG $HOME/rising 2>/dev/null | cut -f1 | tr -dc '0-9')
+            echo "[checkpoint] tree=${TREE}G free=${FREE}G"
+            if [ "$FREE" -lt 4 ]; then
+              echo "===================================================="
+              echo "WALL_HIT: GitHub free server disk exhausted."
+              echo "tree reached ${TREE}G with only ${FREE}G free - the A17"
+              echo "source alone needs 50-70GB. out/ would need 50-150GB more."
+              echo "Conclusion: full ROM build is impossible on free runners;"
+              echo "the crave build (job 301681) is the real one."
+              echo "===================================================="
+              kill $SPID 2>/dev/null; pkill -f "repo sync" 2>/dev/null; sleep 3
+              tail -5 /tmp/sync.log || true
+              exit 3
+            fi
+          done
+          wait $SPID || true
+          RC=$(cat /tmp/sync.rc 2>/dev/null || echo 1)
+          echo "sync finished rc=$RC; tree=$(du -sBG $HOME/rising | cut -f1), free=$(df -BG --output=avail / | tail -1)"
+          if [ "$RC" != "0" ]; then tail -20 /tmp/sync.log; echo "SYNC FAILED on GitHub free server"; exit 1; fi
+
+      - name: If the tree fit - attempt the build (expected: out/ will not fit)
+        if: success()
+        run: |
+          cd $HOME/rising
+          export RELAX_USES_LIBRARY_CHECK=true
+          source build/envsetup.sh
+          riseup udon userdebug || lunch rising_udon-userdebug || lunch lineage_udon-userdebug
+          mka bacon -j$(nproc) 2>&1 | tail -50
