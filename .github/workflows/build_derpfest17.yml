@@ -209,6 +209,14 @@ jobs:
                       out.append("# removed stale prebuilt-kernel line\n"); continue
                   out.append(line)
               open(P, "w").write("".join(out)); print("fallback surgical removal applied")
+          # sweep leftover KERNEL_PATH lines (wly dtbs/dtbo refs poison soong:
+          # 'Path is outside directory: /dtbs/dtbo.img' + kernel-source override)
+          s2 = open(P).read()
+          lines = s2.splitlines(True)
+          kept = [l for l in lines if "KERNEL_PATH" not in l]
+          if len(kept) != len(lines):
+              open(P, "w").write("".join(kept))
+              print(f"swept {len(lines)-len(kept)} leftover KERNEL_PATH line(s)")
           PYEOF
 
           echo "=== [3d] derp_udon product shim ==="
