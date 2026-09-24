@@ -77,13 +77,34 @@ jobs:
           sys.exit(1 if bad else 0)
           PYEOF
 
-      - name: "Sync sources"
+      - name: "Sync sources (chunked, keep-alive)"
         run: |
           cd android
-          PATH=~/bin:$PATH repo sync -c -j4 --force-sync --fail-fast \
-            --no-clone-bundle --no-tags --optimized-fetch --prune || \
-          { sleep 90; PATH=~/bin:$PATH repo sync -c -j4 --force-sync --fail-fast \
-            --no-clone-bundle --no-tags --optimized-fetch --prune; }
+          # Sync in groups of projects with a heartbeat so GitHub hosted runner doesn't
+          # lose communication on long fetches. -j4, --fail-fast disabled on final pass.
+          PATH=~/bin:$PATH
+          echo ">>> repo sync --network-only first (phase 1, fetch-only)"
+          PATH=~/bin:$PATH repo sync -c -j4 --force-sync --no-clone-bundle --no-tags \
+            --optimized-fetch --prune --fetch-submodules --network-only 2>&1 | \
+            tee /tmp/sync1.log &
+          SPID=$!
+          # heartbeat: print every 45s while sync runs
+          while kill -0 $SPID 2>/dev/null; do
+            sleep 45
+            echo "...sync phase1 still running... $(date +%H:%M:%S)"
+          done
+          wait $SPID || { echo "phase1 failed; see tail:"; tail -40 /tmp/sync1.log; }
+          df -h /
+          echo ">>> repo sync checkout phase (phase 2)"
+          PATH=~/bin:$PATH repo sync -c -l --force-sync 2>&1 | tee /tmp/sync2.log &
+          SPID=$!
+          while kill -0 $SPID 2>/dev/null; do
+            sleep 45
+            echo "...sync phase2 still running... $(date +%H:%M:%S)"
+          done
+          wait $SPID
+          echo ">>> verify sync"
+          PATH=~/bin:$PATH repo forall -c 'echo $REPO_PATH ok' 2>/dev/null | wc -l
           df -h /
 
       - name: "corvus_udon product shim (A12L compat + kernel engine)"
