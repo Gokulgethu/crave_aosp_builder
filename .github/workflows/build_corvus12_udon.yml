@@ -111,13 +111,15 @@ jobs:
           EOF
           sed -i "s|@INH@|$INH|" device/oneplus/udon/corvus_udon.mk
 
-          # Register product in AndroidProducts.mk (idempotent)
-          if ! grep -q corvus_udon.mk device/oneplus/udon/AndroidProducts.mk; then
-            sed -i 's|$(LOCAL_DIR)/lineage_udon.mk|$(LOCAL_DIR)/lineage_udon.mk \\\
-                $(LOCAL_DIR)/corvus_udon.mk|' device/oneplus/udon/AndroidProducts.mk
-            sed -i 's|lineage_udon-userdebug|corvus_udon-userdebug \\\
-                lineage_udon-userdebug|' device/oneplus/udon/AndroidProducts.mk
-          fi
+          # Register product in AndroidProducts.mk (idempotent) - careful to not double-add
+          grep -q 'corvus_udon.mk' device/oneplus/udon/AndroidProducts.mk || {
+            awk '
+              /\$\(LOCAL_DIR\)\/lineage_udon.mk/ && !added { print; print "    $(LOCAL_DIR)/corvus_udon.mk \\"; added=1; next }
+              /lineage_udon-userdebug/ && !added2 { print "    corvus_udon-userdebug \\"; print; added2=1; next }
+              { print }
+            ' device/oneplus/udon/AndroidProducts.mk > device/oneplus/udon/AndroidProducts.mk.new
+            mv device/oneplus/udon/AndroidProducts.mk.new device/oneplus/udon/AndroidProducts.mk
+          }
 
           # Swap lineage vendor inherit for corvus
           sed -i "s|vendor/lineage/config/common_full_phone.mk|$INH|" \
@@ -128,44 +130,25 @@ jobs:
             device/oneplus/sm8450-common/kernel/kernel-platform-product.mk \
             device/oneplus/sm8450-common/kernel/kernel-platform-board.mk
 
-          # ---- 3. Stub missing qcom kernel-DDK makefiles (A13 tree inherited DLKM modules) ----
-          mkdir -p \
-            vendor/qcom/opensource/audio-kernel \
-            vendor/qcom/opensource/camera-kernel/config \
-            vendor/qcom/opensource/dataipa \
-            vendor/qcom/opensource/datarmnet-ext \
-            vendor/qcom/opensource/datarmnet \
-            vendor/qcom/opensource/display-drivers \
-            vendor/qcom/opensource/eva-kernel \
-            vendor/qcom/opensource/mmrm-driver \
-            vendor/qcom/opensource/spf \
-            vendor/qcom/opensource/vidc \
-            vendor/qcom/opensource/wlan \
-            vendor/qcom/opensource/wlan-platforms \
-            vendor/qcom/opensource/wlan-platforms-qca6490 \
-            vendor/qcom/opensource/wlan-platforms-wigig
-          for f in \
-            vendor/qcom/opensource/audio-kernel/audio_kernel_product_board.mk \
-            vendor/qcom/opensource/camera-kernel/config/waipio.mk \
-            vendor/qcom/opensource/camera-kernel/product.mk \
-            vendor/qcom/opensource/dataipa/dataipa_dlkm_vendor_product.mk \
-            vendor/qcom/opensource/datarmnet-ext/datarmnet_ext_dlkm_vendor_product.mk \
-            vendor/qcom/opensource/datarmnet/datarmnet_dlkm_vendor_product.mk \
-            vendor/qcom/opensource/display-drivers/display_driver_product.mk \
-            vendor/qcom/opensource/eva-kernel/eva_kernel_product.mk \
-            vendor/qcom/opensource/mmrm-driver/mmrm_kernel_board.mk \
-            vendor/qcom/opensource/spf/ar_board.mk \
-            vendor/qcom/opensource/vidc/vidc_board.mk \
-            vendor/qcom/opensource/wlan/wlan_board.mk \
-            vendor/qcom/opensource/wlan-platforms/bdwlan1901_board.mk \
-            vendor/qcom/opensource/wlan-platforms/bdf_board.mk \
-            vendor/qcom/opensource/wlan-platforms/bdwlan_board.mk \
-            vendor/qcom/opensource/wlan-platforms-qca6490/qca6490_board.mk \
-            vendor/qcom/opensource/wlan-platforms-wigig/wigig_board.mk ; do
-            mkdir -p "$(dirname "$f")"
-            [ -f "$f" ] || echo "# A12L stub (kernel modules built from source kernel tree)" > "$f"
+          # ---- 3. Stub missing qcom kernel-DDK makefiles ----
+          # A13 sm8450-common references ~14 kernel-DDK vendor repos that don't exist in A12L.
+          # Auto-discover every $(call inherit-product/include) of vendor/qcom/opensource/.../*.mk
+          # under device/ + vendor/oneplus/ and stub missing ones as empty.
+          STUB_COUNT=0
+          for src in device/oneplus/sm8450-common device/oneplus/udon vendor/oneplus/sm8450-common vendor/oneplus/udon; do
+            [ -d "$src" ] || continue
+            while IFS= read -r mk; do
+              [ -z "$mk" ] && continue
+              mkf="${mk%% *}"  # strip trailing junk
+              case "$mkf" in vendor/qcom/opensource/*.mk) ;; *) continue;; esac
+              if [ ! -f "$mkf" ]; then
+                mkdir -p "$(dirname "$mkf")"
+                echo "# A12L stub (DDK module built in kernel source tree)" > "$mkf"
+                STUB_COUNT=$((STUB_COUNT+1))
+              fi
+            done < <(grep -rhoE 'vendor/qcom/opensource/[A-Za-z0-9_./-]+\.mk' "$src" 2>/dev/null | sort -u)
           done
-          echo "stubs: $(find vendor/qcom/opensource -maxdepth 4 \( -name '*_board.mk' -o -name '*_product.mk' -o -name 'waipio.mk' \) | wc -l) DDK mk present"
+          echo "stubs created: $STUB_COUNT"
 
           # ---- 4. Wire source-kernel build (vendor_lineage LOS19 kernel engine) ----
           if ! grep -q 'TARGET_KERNEL_SOURCE :=' device/oneplus/sm8450-common/BoardConfigCommon.mk; then
