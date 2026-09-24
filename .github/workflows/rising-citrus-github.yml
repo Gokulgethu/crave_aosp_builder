@@ -21,17 +21,7 @@ jobs:
           echo "--- after cleanup ---"
           df -h / 2>/dev/null; df -h /mnt 2>/dev/null || echo "(no /mnt)"
 
-      - name: Use /mnt overflow for out/ if it is big
-        run: |
-          MNTFREE=$(df -BG --output=avail /mnt 2>/dev/null | tail -1 | tr -dc '0-9')
-          echo "mnt_free=${MNTFREE:-0}G"
-          if [ -n "$MNTFREE" ] && [ "$MNTFREE" -gt 60 ]; then
-            mkdir -p /mnt/citrus-out
-            echo "OUT_DIR=/mnt/citrus-out" >> $GITHUB_ENV
-            echo "USING /mnt for out/ directory"
-          else
-            echo "/mnt too small or absent - out/ stays on /"
-          fi
+      # NOTE: /mnt is on the SAME filesystem as / (no extra space) - out/ stays in the tree.
 
       - name: Install build deps + repo tool
         run: |
