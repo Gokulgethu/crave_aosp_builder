@@ -80,7 +80,7 @@ jobs:
       - name: "Sync sources"
         run: |
           cd android
-          PATH=~/bin:$PATH repo sync -c -j"$(nproc --all)" --force-sync --fail-fast \
+          PATH=~/bin:$PATH repo sync -c -j4 --force-sync --fail-fast \
             --no-clone-bundle --no-tags --optimized-fetch --prune || \
           { sleep 90; PATH=~/bin:$PATH repo sync -c -j4 --force-sync --fail-fast \
             --no-clone-bundle --no-tags --optimized-fetch --prune; }
