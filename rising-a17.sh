@@ -1,6 +1,7 @@
 # RisingOS (Android 17 / seventeen) + OnePlus 11R (udon / CPH2487) | Gokulgethu trees
 # Attempt 3 — per user request:
-#   * depth-1 everywhere (repo init --depth=1, repo sync --depth=1, shallow clones)
+#   * depth-1 everywhere (repo init --depth=1 persists as repo.depth; current repo
+#     removed --depth from sync - 301681 died on it, so sync lines no longer pass it)
 #   * prebuilts/gcc target toolchains pinned back in (arm-linux-androideabi-4.9 +
 #     x86_64-linux-android-4.9 from LineageOS mirrors, clone-depth=1) — also stops
 #     repo's "Cannot remove project" conflict from 301391 since they're manifest members now
@@ -60,10 +61,10 @@ SYNC_OK=0
 for PASS in 1 2 3; do
   echo "--- sync pass $PASS ---"
   rm -f /tmp/sync.log
-  repo sync -c --depth=1 -j$(nproc) --no-tags --prune -d --force-sync --no-clone-bundle --optimized-fetch > /tmp/sync.log 2>&1 && { SYNC_OK=1; break; }
+  repo sync -c -j$(nproc) --no-tags --prune -d --force-sync --no-clone-bundle --optimized-fetch > /tmp/sync.log 2>&1 && { SYNC_OK=1; break; }
   RC=$?
   echo "--- pass $PASS failed (rc=$RC): last errors ---"
-  grep -E "^error:|SyncError|Cannot|fatal:" /tmp/sync.log | tail -12
+  grep -E "^error:|SyncError|Cannot|fatal:|Usage:|no such option" /tmp/sync.log | tail -12
   echo "--- healing failing project dirs for next pass ---"
   grep -oE '^error: [A-Za-z0-9_./-]+: Cannot remove project' /tmp/sync.log | sed 's/^error: //; s/: Cannot remove project//' | sort -u | while read P; do
     echo "  rm -rf $P"; rm -rf "$P"
@@ -77,7 +78,7 @@ done
 if [ "$SYNC_OK" != "1" ]; then
   echo "=== final fallback: repo sync -j1 --fail-fast (surface the first real error) ==="
   repo forall -j8 -c 'git checkout -- . 2>/dev/null || true' || true
-  repo sync -c --depth=1 -j1 --fail-fast --no-tags --prune -d --force-sync --no-clone-bundle 2>&1 | tail -40
+  repo sync -c -j1 --fail-fast --no-tags --prune -d --force-sync --no-clone-bundle 2>&1 | tail -40
   RC=${PIPESTATUS[0]}
   [ $RC -eq 0 ] || { echo "FATAL: sync failed after all passes - see errors above"; exit 1; }
 fi
