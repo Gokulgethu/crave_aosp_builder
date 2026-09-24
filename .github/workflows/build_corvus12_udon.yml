@@ -160,6 +160,10 @@ jobs:
           echo "stubs created: $STUB_COUNT"
 
           # ---- 4. Wire source-kernel build (vendor_lineage LOS19 kernel engine) ----
+          # vendor/lineage ships a Soong plugin that collides with Corvus' own generator
+          # package context. We only need build/tasks/kernel.mk — drop the rest.
+          rm -rf vendor/lineage/build/soong
+          rm -rf vendor/lineage/lineage-sdk vendor/lineage/packages 2>/dev/null || true
           if ! grep -q 'TARGET_KERNEL_SOURCE :=' device/oneplus/sm8450-common/BoardConfigCommon.mk; then
             cat >> device/oneplus/sm8450-common/BoardConfigCommon.mk <<'EOF'
 
