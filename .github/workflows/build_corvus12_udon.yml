@@ -1,4 +1,4 @@
-name: Corvus OS 12 udon (template-style)
+name: Corvus OS 12 udon (template-style v2.2)
 
 on:
   workflow_dispatch:
@@ -86,12 +86,14 @@ jobs:
             --no-clone-bundle --no-tags --optimized-fetch --prune; }
           df -h /
 
-      - name: "corvus_udon product (shim + kernel engine)"
+      - name: "corvus_udon product shim (A12L compat + kernel engine)"
         run: |
           cd android
           INH=vendor/corvus/config/common.mk
           [ -f vendor/corvus/config/common_full_phone.mk ] && INH=vendor/corvus/config/common_full_phone.mk
           echo "corvus inherit target: $INH"
+
+          # ---- 1. corvus_udon product makefile ----
           cat > device/oneplus/udon/corvus_udon.mk <<'EOF'
           # World-first A12L udon product (auto-generated)
           $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
@@ -108,20 +110,88 @@ jobs:
           CORVUS_MAINTAINER := udon_builder
           EOF
           sed -i "s|@INH@|$INH|" device/oneplus/udon/corvus_udon.mk
-          sed -i 's|$(LOCAL_DIR)/lineage_udon.mk|$(LOCAL_DIR)/lineage_udon.mk \\\n    $(LOCAL_DIR)/corvus_udon.mk|' device/oneplus/udon/AndroidProducts.mk
-          sed -i 's|lineage_udon-userdebug|corvus_udon-userdebug \\\n    lineage_udon-userdebug|' device/oneplus/udon/AndroidProducts.mk
-          sed -i "s|vendor/lineage/config/common_full_phone.mk|$INH|" device/oneplus/udon/lineage_udon.mk device/oneplus/sm8450-common/common.mk || true
-          grep -q TARGET_KERNEL_SOURCE device/oneplus/sm8450-common/BoardConfigCommon.mk || cat >> device/oneplus/sm8450-common/BoardConfigCommon.mk <<'EOF'
+
+          # Register product in AndroidProducts.mk (idempotent)
+          if ! grep -q corvus_udon.mk device/oneplus/udon/AndroidProducts.mk; then
+            sed -i 's|$(LOCAL_DIR)/lineage_udon.mk|$(LOCAL_DIR)/lineage_udon.mk \\\
+                $(LOCAL_DIR)/corvus_udon.mk|' device/oneplus/udon/AndroidProducts.mk
+            sed -i 's|lineage_udon-userdebug|corvus_udon-userdebug \\\
+                lineage_udon-userdebug|' device/oneplus/udon/AndroidProducts.mk
+          fi
+
+          # Swap lineage vendor inherit for corvus
+          sed -i "s|vendor/lineage/config/common_full_phone.mk|$INH|" \
+            device/oneplus/udon/lineage_udon.mk device/oneplus/sm8450-common/common.mk 2>/dev/null || true
+
+          # ---- 2. Disable A13 prebuilt-kernel-platform path ----
+          sed -i 's|^TARGET_USES_KERNEL_PLATFORM ?= true|TARGET_USES_KERNEL_PLATFORM := false|' \
+            device/oneplus/sm8450-common/kernel/kernel-platform-product.mk \
+            device/oneplus/sm8450-common/kernel/kernel-platform-board.mk
+
+          # ---- 3. Stub missing qcom kernel-DDK makefiles (A13 tree inherited DLKM modules) ----
+          mkdir -p \
+            vendor/qcom/opensource/audio-kernel \
+            vendor/qcom/opensource/camera-kernel/config \
+            vendor/qcom/opensource/dataipa \
+            vendor/qcom/opensource/datarmnet-ext \
+            vendor/qcom/opensource/datarmnet \
+            vendor/qcom/opensource/display-drivers \
+            vendor/qcom/opensource/eva-kernel \
+            vendor/qcom/opensource/mmrm-driver \
+            vendor/qcom/opensource/spf \
+            vendor/qcom/opensource/vidc \
+            vendor/qcom/opensource/wlan \
+            vendor/qcom/opensource/wlan-platforms \
+            vendor/qcom/opensource/wlan-platforms-qca6490 \
+            vendor/qcom/opensource/wlan-platforms-wigig
+          for f in \
+            vendor/qcom/opensource/audio-kernel/audio_kernel_product_board.mk \
+            vendor/qcom/opensource/camera-kernel/config/waipio.mk \
+            vendor/qcom/opensource/camera-kernel/product.mk \
+            vendor/qcom/opensource/dataipa/dataipa_dlkm_vendor_product.mk \
+            vendor/qcom/opensource/datarmnet-ext/datarmnet_ext_dlkm_vendor_product.mk \
+            vendor/qcom/opensource/datarmnet/datarmnet_dlkm_vendor_product.mk \
+            vendor/qcom/opensource/display-drivers/display_driver_product.mk \
+            vendor/qcom/opensource/eva-kernel/eva_kernel_product.mk \
+            vendor/qcom/opensource/mmrm-driver/mmrm_kernel_board.mk \
+            vendor/qcom/opensource/spf/ar_board.mk \
+            vendor/qcom/opensource/vidc/vidc_board.mk \
+            vendor/qcom/opensource/wlan/wlan_board.mk \
+            vendor/qcom/opensource/wlan-platforms/bdwlan1901_board.mk \
+            vendor/qcom/opensource/wlan-platforms/bdf_board.mk \
+            vendor/qcom/opensource/wlan-platforms/bdwlan_board.mk \
+            vendor/qcom/opensource/wlan-platforms-qca6490/qca6490_board.mk \
+            vendor/qcom/opensource/wlan-platforms-wigig/wigig_board.mk ; do
+            mkdir -p "$(dirname "$f")"
+            [ -f "$f" ] || echo "# A12L stub (kernel modules built from source kernel tree)" > "$f"
+          done
+          echo "stubs: $(find vendor/qcom/opensource -maxdepth 4 \( -name '*_board.mk' -o -name '*_product.mk' -o -name 'waipio.mk' \) | wc -l) DDK mk present"
+
+          # ---- 4. Wire source-kernel build (vendor_lineage LOS19 kernel engine) ----
+          if ! grep -q 'TARGET_KERNEL_SOURCE :=' device/oneplus/sm8450-common/BoardConfigCommon.mk; then
+            cat >> device/oneplus/sm8450-common/BoardConfigCommon.mk <<'EOF'
 
           # A12L world-first: 5.10 GKI kernel from source (vendor_lineage engine)
           TARGET_KERNEL_SOURCE := kernel/oneplus/sm8450
           TARGET_KERNEL_CONFIG := gki_defconfig
           TARGET_KERNEL_CLANG_COMPILE := true
           TARGET_KERNEL_CLANG_PATH := prebuilts/clang/host/linux-x86/weebx-clang
+          TARGET_KERNEL_USES_LLVM := true
           BOARD_KERNEL_IMAGE_NAME := Image
           EOF
+          fi
+          grep -q 'vendor/lineage/build/tasks/kernel.mk' device/oneplus/sm8450-common/BoardConfigCommon.mk || \
+            echo '-include vendor/lineage/build/tasks/kernel.mk' >> device/oneplus/sm8450-common/BoardConfigCommon.mk
+          grep -q 'BOARD_INCLUDE_DTB_IN_BOOTIMG' device/oneplus/sm8450-common/BoardConfigCommon.mk || \
+            echo 'BOARD_INCLUDE_DTB_IN_BOOTIMG := true' >> device/oneplus/sm8450-common/BoardConfigCommon.mk
+
+          # ---- 5. GApps check ----
           ls vendor/google/gms >/dev/null 2>&1 && echo "GApps: present" || echo "WARN: GApps missing"
+
+          echo "=== AndroidProducts.mk ==="
           cat device/oneplus/udon/AndroidProducts.mk
+          echo "=== tail BoardConfigCommon.mk ==="
+          tail -20 device/oneplus/sm8450-common/BoardConfigCommon.mk
 
       - name: "Build ROM"
         run: |
@@ -132,7 +202,7 @@ jobs:
           mka bacon -j"$(nproc --all)" 2>&1 | tee build.log || \
           m bacon -j"$(nproc --all)" 2>&1 | tee build.log || \
           mka bacon -j2 2>&1 | tee build.log
-          tail -40 build.log
+          tail -60 build.log
 
       - name: "List artifacts"
         run: |
