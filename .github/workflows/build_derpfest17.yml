@@ -75,21 +75,16 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           cd android
-          OK=0; J=$(nproc --all)
-          for i in 1 2 3; do
-            echo "--- sync attempt $i (-j$J) ---"
-            [ "$i" = "1" ] || {
-              echo "wipe-all for guaranteed-clean clone"
-              find . -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
-              repo init -u https://github.com/DerpFest-AOSP/android_manifest.git -b 17 --git-lfs --depth=1
-              mkdir -p .repo/local_manifests
-              curl -s -o .repo/local_manifests/udon-a17.xml \
-                https://raw.githubusercontent.com/Gokulgethu/local_manifests/main/udon-a17.xml
-            }
-            if repo sync -c -j$J --force-sync --fail-fast --no-clone-bundle --no-tags --optimized-fetch --prune; then OK=1; break; fi
-            echo "sync failed (likely googlesource 429); backoff 120s, lower -j"
-            sleep 120
-            J=$(( J / 2 )); [ "$J" -lt 4 ] && J=4
+          OK=0
+          # GH-hosted runners die ("lost communication") under -j16 fetch storms -
+          # keep parallelism at 4 to protect the agent heartbeat. Partial clients from
+          # aborted attempts are OUR OWN downloads: --force-sync continues over them
+          # (a wipe would restart the ~200GB fetch from zero - never do it here).
+          for i in 1 2 3 4; do
+            echo "--- sync attempt $i (-j4) ---"
+            if repo sync -c -j4 --force-sync --fail-fast --no-clone-bundle --no-tags --optimized-fetch --prune; then OK=1; break; fi
+            echo "sync attempt $i failed; backoff 90s"
+            sleep 90
           done
           [ "$OK" = "1" ] || { echo "FATAL: repo sync failed 3x"; exit 1; }
 
