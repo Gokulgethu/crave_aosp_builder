@@ -53,6 +53,30 @@ jobs:
           git clone --depth=1 https://github.com/Gokulgethu/local_manifests.git .repo/local_manifests -b main
           cat .repo/local_manifests/udon-a12l.xml
 
+      - name: "Validate manifest (30s, not 12min)"
+        run: |
+          cd android
+          python3 - <<'PYEOF'
+          import re, subprocess, sys
+          xml = open('.repo/local_manifests/udon-a12l.xml').read()
+          remotes = {m.group(1): (m.group(2), m.group(3) or '') for m in re.finditer(r'<remote name="([^"]+)" fetch="([^"]+)"(?: revision="([^"]+)")?', xml)}
+          bad = 0
+          for p in re.findall(r'<project (.*?)/>', xml):
+              name = re.search(r'name="([^"]+)"', p).group(1)
+              revm = re.search(r'revision="([^"]+)"', p)
+              rname = re.search(r'remote="([^"]+)"', p).group(1)
+              fetch, drev = remotes[rname]
+              rev = revm.group(1) if revm else drev
+              url = fetch.rstrip('/') + '/' + name + '.git'
+              r = subprocess.run(['git', 'ls-remote', '--heads', url, rev], capture_output=True, text=True, timeout=90)
+              ok = bool(r.stdout.strip())
+              print(('OK  ' if ok else 'FAIL'), url.replace('https://', '')[:80], '@', rev)
+              if not ok:
+                  bad += 1
+          print('BAD PROJECTS:', bad)
+          sys.exit(1 if bad else 0)
+          PYEOF
+
       - name: "Sync sources"
         run: |
           cd android
