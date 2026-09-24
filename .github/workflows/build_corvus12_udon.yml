@@ -1,4 +1,4 @@
-name: Corvus OS 12 udon (template-style v2.2)
+name: Corvus OS 12 udon (template-style v2.3)
 
 on:
   workflow_dispatch:
