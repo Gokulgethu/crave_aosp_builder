@@ -1,4 +1,4 @@
-name: Build Corvus OS 12 (World-First A12L / OnePlus 11R udon)
+name: Corvus OS 12 udon (template-style)
 
 on:
   workflow_dispatch:
@@ -19,20 +19,15 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: "System specs"
-        run: |
-          lscpu | grep "Model name\|CPU(s):" || true
-          free -h; df -h /
-
       - name: "Free disk space"
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
             /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift \
             /usr/local/share/powershell /usr/lib/jvm /opt/az /opt/pipx 2>/dev/null || true
-          sudo docker image prune -af 2>/dev/null || true
+          sudo apt-get clean || true
           df -h /
 
-      - name: "Install deps + repo"
+      - name: "Install dependencies"
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bc bison build-essential ccache curl flex g++-multilib \
@@ -42,170 +37,87 @@ jobs:
           mkdir -p ~/bin
           curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
-          git lfs install || true
           git config --global user.name "udon-builder"
           git config --global user.email "builder@local"
           git config --global color.ui false
 
-      - name: "repo init (Corvus 12 / android-12.1.0_r8, shallow)"
-        working-directory: ${{ github.workspace }}
+      - name: "Initialize Corvus 12 manifest"
         run: |
           mkdir -p android && cd android
           PATH=~/bin:$PATH repo init -u https://github.com/Corvus-AOSP/android_manifest.git -b 12 --depth=1
 
-      - name: "Inject udon A12L local manifest"
-        working-directory: ${{ github.workspace }}
+      - name: "Clone local manifest"
         run: |
           cd android
-          mkdir -p .repo/local_manifests
-          curl -sf -o .repo/local_manifests/udon-a12l.xml \
-            https://raw.githubusercontent.com/Gokulgethu/local_manifests/main/udon-a12l.xml
+          rm -rf .repo/local_manifests
+          git clone --depth=1 https://github.com/Gokulgethu/local_manifests.git .repo/local_manifests -b main
           cat .repo/local_manifests/udon-a12l.xml
 
-      - name: "repo sync (j4, no-wipe retries)"
-        working-directory: ${{ github.workspace }}
+      - name: "Sync sources"
         run: |
           cd android
-          OK=0
-          # GH-hosted runners die under fetch storms (-j16 starves the agent heartbeat).
-          # Partial clients are our own downloads: --force-sync continues over them.
-          for i in 1 2 3 4; do
-            echo "--- sync attempt $i (-j4) ---"
-            if PATH=~/bin:$PATH repo sync -c -j4 --force-sync --fail-fast --no-clone-bundle --no-tags --optimized-fetch --prune; then OK=1; break; fi
-            echo "sync attempt $i failed; backoff 90s"
-            sleep 90
-          done
-          [ "$OK" = "1" ] || { echo "FATAL: repo sync failed 4x"; exit 1; }
+          PATH=~/bin:$PATH repo sync -c -j"$(nproc --all)" --force-sync --fail-fast \
+            --no-clone-bundle --no-tags --optimized-fetch --prune || \
+          { sleep 90; PATH=~/bin:$PATH repo sync -c -j4 --force-sync --fail-fast \
+            --no-clone-bundle --no-tags --optimized-fetch --prune; }
           df -h /
 
-      - name: "Install auto-repair helper"
-        run: |
-          cat > /tmp/repair.py <<'PYEOF'
-          import re, sys
-          try_n = sys.argv[1] if len(sys.argv) > 1 else "0"
-          log = open("/tmp/mka_%s.log" % try_n, errors="ignore").read()
-          errs = set(re.findall(r'error: (\S+?\.bp):\d+:\d+: module "([^"]+)": .*?depends on (?:nonexistent|undefined) module "([^"]+)"', log))
-          n = 0
-          for bp, mod, dep in list(errs)[:40]:
-              s = open(bp, errors="ignore").read()
-              s2 = re.sub(r'\s*"%s",' % re.escape(dep), "", s)
-              s2 = re.sub(r',\s*"%s"' % re.escape(dep), "", s2)
-              if s2 != s:
-                  open(bp, "w").write(s2)
-                  print("pruned undefined ref %s from %s" % (dep, bp))
-                  n += 1
-          print("pruned", n, "refs; aidl-mixed files:", len(set(re.findall(r'error: (\S+?\.bp):\d+:\d+: .*?aidl', log))))
-          PYEOF
-
-      - name: "A12L adaptation passes (shim + inherit swap + kernel engine)"
-        working-directory: ${{ github.workspace }}
+      - name: "corvus_udon product (shim + kernel engine)"
         run: |
           cd android
-          echo "=== [c1] uniqueness guards ==="
-          UDON_COUNT=$(PATH=~/bin:$PATH repo list 2>/dev/null | grep -c '^device/oneplus/udon ' || true)
-          echo "udon tree count: $UDON_COUNT"; [ "$UDON_COUNT" = "1" ] || exit 1
-          echo "=== [c2] corvus_udon shim + inherit swap + kernel engine ==="
-          python3 - <<'PYEOF'
-          import os, re, glob
-          cand = [p for p in [
-              "vendor/corvus/config/common_full_phone.mk",
-              "vendor/corvus/config/common.mk",
-              "vendor/corvus/config/corvus_full_phone.mk",
-          ] if os.path.exists(p)]
-          assert cand, "no vendor/corvus config found! config dir: " + str(glob.glob("vendor/corvus/config/*"))
-          inherit = cand[0]
-          shim = (
-              "# World-first A12L udon product (auto-generated shim)\n"
-              "$(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)\n"
-              "$(call inherit-product, $(SRC_TARGET_DIR)/product/full_base_telephony.mk)\n"
-              "$(call inherit-product, device/oneplus/udon/device.mk)\n"
-              "$(call inherit-product, " + inherit + ")\n"
-              "PRODUCT_NAME := corvus_udon\n"
-              "PRODUCT_DEVICE := udon\n"
-              "PRODUCT_MANUFACTURER := OnePlus\n"
-              "PRODUCT_BRAND := OnePlus\n"
-              "PRODUCT_MODEL := CPH2487\n"
-              "PRODUCT_GMS_CLIENTID_BASE := android-oneplus\n"
-              "CORVUS_BUILDTYPE := UNOFFICIAL\n"
-              "CORVUS_MAINTAINER := udon_builder\n"
-          )
-          open("device/oneplus/udon/corvus_udon.mk", "w").write(shim)
-          print("corvus_udon shim written (inherits " + inherit + ")")
-          ap_path = "device/oneplus/udon/AndroidProducts.mk"
-          ap = open(ap_path).read()
-          if "corvus_udon.mk" not in ap:
-              ap = ap.replace("$(LOCAL_DIR)/lineage_udon.mk",
-                              "$(LOCAL_DIR)/lineage_udon.mk \\\n    $(LOCAL_DIR)/corvus_udon.mk", 1)
-              ap = ap.replace("lineage_udon-userdebug",
-                              "corvus_udon-userdebug \\\n    lineage_udon-userdebug", 1)
-              open(ap_path, "w").write(ap)
-          print("AndroidProducts updated")
-          for f in ["device/oneplus/udon/lineage_udon.mk", "device/oneplus/sm8450-common/common.mk"]:
-              if os.path.exists(f):
-                  s = open(f).read()
-                  s2 = s.replace("vendor/lineage/config/common_full_phone.mk", inherit)
-                  if s2 != s:
-                      open(f, "w").write(s2)
-                      print("swapped lineage->corvus inherit in " + f)
-          bcc = "device/oneplus/sm8450-common/BoardConfigCommon.mk"
-          s = open(bcc).read()
-          if "TARGET_KERNEL_SOURCE" not in s:
-              s += (
-                  "\n"
-                  "# A12L world-first: 5.10 GKI kernel from source via vendor_lineage engine\n"
-                  "TARGET_KERNEL_SOURCE := kernel/oneplus/sm8450\n"
-                  "TARGET_KERNEL_CONFIG := gki_defconfig\n"
-                  "TARGET_KERNEL_CLANG_COMPILE := true\n"
-                  "TARGET_KERNEL_CLANG_PATH := prebuilts/clang/host/linux-x86/weebx-clang\n"
-                  "BOARD_KERNEL_IMAGE_NAME := Image\n"
-              )
-              open(bcc, "w").write(s)
-              print("kernel engine config appended")
-          else:
-              print("kernel config already present")
-          print("gms present:", os.path.isdir("vendor/google/gms"))
-          PYEOF
-          df -h /
+          INH=vendor/corvus/config/common.mk
+          [ -f vendor/corvus/config/common_full_phone.mk ] && INH=vendor/corvus/config/common_full_phone.mk
+          echo "corvus inherit target: $INH"
+          cat > device/oneplus/udon/corvus_udon.mk <<'EOF'
+          # World-first A12L udon product (auto-generated)
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/full_base_telephony.mk)
+          $(call inherit-product, device/oneplus/udon/device.mk)
+          $(call inherit-product, @INH@)
+          PRODUCT_NAME := corvus_udon
+          PRODUCT_DEVICE := udon
+          PRODUCT_MANUFACTURER := OnePlus
+          PRODUCT_BRAND := OnePlus
+          PRODUCT_MODEL := CPH2487
+          PRODUCT_GMS_CLIENTID_BASE := android-oneplus
+          CORVUS_BUILDTYPE := UNOFFICIAL
+          CORVUS_MAINTAINER := udon_builder
+          EOF
+          sed -i "s|@INH@|$INH|" device/oneplus/udon/corvus_udon.mk
+          sed -i 's|$(LOCAL_DIR)/lineage_udon.mk|$(LOCAL_DIR)/lineage_udon.mk \\\n    $(LOCAL_DIR)/corvus_udon.mk|' device/oneplus/udon/AndroidProducts.mk
+          sed -i 's|lineage_udon-userdebug|corvus_udon-userdebug \\\n    lineage_udon-userdebug|' device/oneplus/udon/AndroidProducts.mk
+          sed -i "s|vendor/lineage/config/common_full_phone.mk|$INH|" device/oneplus/udon/lineage_udon.mk device/oneplus/sm8450-common/common.mk || true
+          grep -q TARGET_KERNEL_SOURCE device/oneplus/sm8450-common/BoardConfigCommon.mk || cat >> device/oneplus/sm8450-common/BoardConfigCommon.mk <<'EOF'
 
-      - name: "Lunch corvus_udon (fallback lineage_udon)"
-        working-directory: ${{ github.workspace }}
+          # A12L world-first: 5.10 GKI kernel from source (vendor_lineage engine)
+          TARGET_KERNEL_SOURCE := kernel/oneplus/sm8450
+          TARGET_KERNEL_CONFIG := gki_defconfig
+          TARGET_KERNEL_CLANG_COMPILE := true
+          TARGET_KERNEL_CLANG_PATH := prebuilts/clang/host/linux-x86/weebx-clang
+          BOARD_KERNEL_IMAGE_NAME := Image
+          EOF
+          ls vendor/google/gms >/dev/null 2>&1 && echo "GApps: present" || echo "WARN: GApps missing"
+          cat device/oneplus/udon/AndroidProducts.mk
+
+      - name: "Build ROM"
         run: |
           cd android
-          set +e
-          source build/envsetup.sh >/dev/null 2>&1
-          for P in corvus_udon-userdebug lineage_udon-userdebug; do
-            echo "trying lunch $P"
-            if lunch $P; then echo "LUNCH OK: $P"; break; fi
-          done
-          set -e
-          echo "TARGET_PRODUCT=$TARGET_PRODUCT"
+          set -o pipefail
+          source build/envsetup.sh
+          lunch corvus_udon-userdebug || lunch lineage_udon-userdebug
+          mka bacon -j"$(nproc --all)" 2>&1 | tee build.log || \
+          m bacon -j"$(nproc --all)" 2>&1 | tee build.log || \
+          mka bacon -j2 2>&1 | tee build.log
+          tail -40 build.log
 
-      - name: "Build (auto-repair loop, up to 4 attempts)"
-        working-directory: ${{ github.workspace }}
+      - name: "List artifacts"
         run: |
           cd android
-          set +e
-          source build/envsetup.sh >/dev/null 2>&1
-          lunch corvus_udon-userdebug 2>/dev/null || lunch lineage_udon-userdebug 2>/dev/null
-          for TRY in 0 1 2 3; do
-            echo "--- mka attempt $TRY ---"
-            mka bacon -j3 2>&1 | tee /tmp/mka_$TRY.log || true
-            if grep -qE "Build completed|ninja: no work to do|Package Complete" /tmp/mka_$TRY.log; then
-              echo "BUILD SUCCEEDED (attempt $TRY)"; break
-            fi
-            python3 /tmp/repair.py "$TRY" || true
-          done
-          tail -60 /tmp/mka_3.log 2>/dev/null || true
-          grep -aE "error:|FAILED:|panic:" /tmp/mka_3.log 2>/dev/null | tail -40 || true
-          set -e
-
-      - name: "Acceptance + list artifacts"
-        if: always()
-        working-directory: ${{ github.workspace }}
-        run: |
-          cd android
-          ls -lh out/target/product/udon/*.zip 2>/dev/null || echo "(no zip)"
-          ls -lh out/target/product/udon/boot.img out/target/product/udon/vendor_boot.img out/target/product/udon/dtbo.img 2>/dev/null || true
+          Z=$(ls out/target/product/udon/*.zip 2>/dev/null | head -1)
+          echo "zip: $Z"
+          test -f "$Z"
+          ls -lh out/target/product/udon/*.zip out/target/product/udon/boot.img \
+            out/target/product/udon/vendor_boot.img out/target/product/udon/dtbo.img 2>/dev/null || true
 
       - name: "Upload artifact"
         if: success()
@@ -227,7 +139,7 @@ jobs:
           name: Corvus OS 12 (A12L) — OnePlus 11R (udon) — World First
           body: |
             **WORLD-FIRST Android 12L build for OnePlus 11R (udon/CPH2487)**
-            - **ROM**: Corvus OS 12 (base: AOSP android-12.1.0_r8)
+            - **ROM**: Corvus OS 12 (AOSP android-12.1.0_r8)
             - **Variant**: ${{ inputs.build_type }}
             - **GApps**: built-in (vendor_google_gms 12.1)
             - UNOFFICIAL experiment — flash via recovery, never relock bootloader
