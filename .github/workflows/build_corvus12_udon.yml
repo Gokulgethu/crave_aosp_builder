@@ -184,6 +184,20 @@ jobs:
           # ---- 5. GApps check ----
           ls vendor/google/gms >/dev/null 2>&1 && echo "GApps: present" || echo "WARN: GApps missing"
 
+          # ---- 6. Soong namespace fixes ----
+          # display-commonsys-intf declares its own soong_namespace{} (isolating display_intf_headers)
+          # but hardware/qcom-caf/sm8450/display lives in root namespace and needs it. Flatten it to root.
+          if [ -f vendor/qcom/opensource/display-commonsys-intf/Android.bp ]; then
+            sed -i '/^soong_namespace {$/,/^}$/d' vendor/qcom/opensource/display-commonsys-intf/Android.bp
+            echo "Flattened display-commonsys-intf into root soong namespace"
+          fi
+          # Append missing namespaces to PRODUCT_SOONG_NAMESPACES
+          for ns in vendor/qcom/opensource/display-commonsys-intf packages/resources/devicesettings hardware/oplus; do
+            if ! grep -qr "PRODUCT_SOONG_NAMESPACES.*$ns" device/oneplus/sm8450-common device/oneplus/udon vendor/oneplus 2>/dev/null; then
+              echo "PRODUCT_SOONG_NAMESPACES += $ns" >> device/oneplus/sm8450-common/common.mk
+            fi
+          done
+
           echo "=== AndroidProducts.mk ==="
           cat device/oneplus/udon/AndroidProducts.mk
           echo "=== tail BoardConfigCommon.mk ==="
