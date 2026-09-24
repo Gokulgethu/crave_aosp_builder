@@ -1,5 +1,5 @@
 # RisingOS Android 17 (seventeen) - udon (OnePlus 11R) | Gokulgethu
-# Short build: depth-1 sync, GMS/soong/gcc fix pins, temp.sh-first upload.
+# Short build: crave resync.sh, GMS/soong/gcc fix pins, temp.sh-first upload.
 export BUILD_USERNAME=Gokulgethu
 export BUILD_HOSTNAME=crave
 git config --global user.name "Gokulgethu"
@@ -25,9 +25,9 @@ cat > .repo/local_manifests/zzz-udon-fixes.xml <<'EOF'
 </manifest>
 EOF
 
-# 2) sync (depth persists from init; retry once at -j4)
-repo sync -c -j$(nproc) --no-tags --prune -d --force-sync --no-clone-bundle --optimized-fetch \
-  || repo sync -c -j4 --no-tags --prune -d --force-sync --no-clone-bundle --optimized-fetch
+# 2) sync via crave's resync tool (updates repo, cleans, syncs with build cache)
+rm -rf external/chromium-webview/patches
+/opt/crave/resync.sh
 [ -f device/oneplus/udon/AndroidProducts.mk ] || { echo "FATAL: udon tree missing"; exit 1; }
 
 # 3) build
