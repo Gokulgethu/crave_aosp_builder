@@ -20,7 +20,7 @@ jobs:
           mkdir -p /home/user/citrus-roms/rising-citrus
           cd /home/user/citrus-roms/rising-citrus
           git init -q -b master
-          git remote add origin https://github.com/RisingOS-Revived/android
+          git remote add origin https://github.com/PixelOS-AOSP/android_manifest
           git config user.name "Gokulgethu"
           git config user.email "gokulgethu30@gmail.com"
           git commit -q --allow-empty -m "citrus anchor"
