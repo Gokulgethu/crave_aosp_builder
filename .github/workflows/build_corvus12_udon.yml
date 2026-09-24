@@ -187,21 +187,13 @@ jobs:
           # ---- 6. Soong namespace fixes ----
           # display-commonsys-intf declares its own soong_namespace{} (isolating display_intf_headers)
           # but hardware/qcom-caf/sm8450/display lives in root namespace and needs it. Flatten to root.
-          if [ -f vendor/qcom/opensource/display-commonsys-intf/Android.bp ]; then
-            # strip soong_namespace{} block
-            sed -i '/^soong_namespace {$/,/^}$/d' vendor/qcom/opensource/display-commonsys-intf/Android.bp
-            # lineage-20.0 display-commonsys-intf references two cc_defaults that the sm8450 display
-            # HAL's soong_config_module_type generates; provide empty fallbacks at root namespace
-            cat >> vendor/qcom/opensource/display-commonsys-intf/Android.bp <<'DEFAULTS'
-
-// A12L stubs: soong_config bool-variable defaults expected from sm8450 display HAL
-cc_defaults {
-    name: "gralloc_handle_has_reserved_size_defaults",
-}
-cc_defaults {
-    name: "gralloc_handle_has_custom_content_md_reserved_size_defaults",
-}
-DEFAULTS
+          DCI=vendor/qcom/opensource/display-commonsys-intf/Android.bp
+          if [ -f "$DCI" ]; then
+            sed -i '/^soong_namespace {$/,/^}$/d' "$DCI"
+            # lineage-20.0 display-commonsys-intf references two cc_defaults that sm8450 display's
+            # soong_config_module_type would normally generate for that namespace. Provide empty stubs.
+            printf '\ncc_defaults { name: "gralloc_handle_has_reserved_size_defaults", }\n' >> "$DCI"
+            printf 'cc_defaults { name: "gralloc_handle_has_custom_content_md_reserved_size_defaults", }\n' >> "$DCI"
             echo "Flattened display-commonsys-intf into root soong namespace + gralloc defaults stubs"
           fi
           # Append missing namespaces to PRODUCT_SOONG_NAMESPACES
