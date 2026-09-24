@@ -1,0 +1,350 @@
+name: Build DerpFest 17 for OnePlus 11R (udon)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type'
+        required: true
+        default: 'userdebug'
+        type: choice
+        options: ['userdebug', 'user', 'eng']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: derpfest17-udon-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build DerpFest 17 (OnePlus 11R / udon)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 480
+    steps:
+      - name: "System specs"
+        run: |
+          lscpu | grep "Model name\|CPU(s):" || true
+          free -h
+          df -h /
+
+      - name: "Free disk space"
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift \
+            /usr/local/share/powershell /usr/lib/jvm /opt/az /opt/pipx 2>/dev/null || true
+          sudo docker image prune -af 2>/dev/null || true
+          df -h /
+
+      - name: "Install deps + repo"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison build-essential ccache curl flex g++-multilib \
+            gcc-multilib git git-lfs gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev libelf-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev \
+            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
+            xsltproc zip zlib1g-dev python3 python-is-python3 python3-regex 2>/dev/null || \
+          sudo apt-get install -y -qq bc bison build-essential ccache curl flex git git-lfs \
+            gperf libssl-dev libxml2 libxml2-utils lz4 rsync squashfs-tools zip zlib1g-dev \
+            python3 python-is-python3
+          mkdir -p "$HOME/bin"
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          git config --global user.name "DerpFest Builder"
+          git config --global user.email "build@derpfest.org"
+          git config --global color.ui false
+
+      - name: "repo init (DerpFest 17, shallow)"
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p android && cd android
+          repo init -u https://github.com/DerpFest-AOSP/android_manifest.git -b 17 --git-lfs --depth=1
+
+      - name: "Inject udon A17 local manifest"
+        working-directory: ${{ github.workspace }}
+        run: |
+          cd android
+          mkdir -p .repo/local_manifests
+          curl -s -o .repo/local_manifests/udon-a17.xml \
+            https://raw.githubusercontent.com/Gokulgethu/local_manifests/main/udon-a17.xml
+          cat .repo/local_manifests/udon-a17.xml
+
+      - name: "repo sync (429-resilient)"
+        working-directory: ${{ github.workspace }}
+        run: |
+          cd android
+          OK=0; J=$(nproc --all)
+          for i in 1 2 3; do
+            echo "--- sync attempt $i (-j$J) ---"
+            [ "$i" = "1" ] || {
+              echo "wipe-all for guaranteed-clean clone"
+              find . -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
+              repo init -u https://github.com/DerpFest-AOSP/android_manifest.git -b 17 --git-lfs --depth=1
+              mkdir -p .repo/local_manifests
+              curl -s -o .repo/local_manifests/udon-a17.xml \
+                https://raw.githubusercontent.com/Gokulgethu/local_manifests/main/udon-a17.xml
+            }
+            if repo sync -c -j$J --force-sync --fail-fast --no-clone-bundle --no-tags --optimized-fetch --prune; then OK=1; break; fi
+            echo "sync failed (likely googlesource 429); backoff 120s, lower -j"
+            sleep 120
+            J=$(( J / 2 )); [ "$J" -lt 4 ] && J=4
+          done
+          [ "$OK" = "1" ] || { echo "FATAL: repo sync failed 3x"; exit 1; }
+
+      - name: "Tree sanitation (A17 port fixes)"
+        working-directory: ${{ github.workspace }}
+        run: |
+          cd android
+          echo "=== [3c] uniqueness + product dedup ==="
+          UDON_COUNT=$(repo list 2>/dev/null | grep -c '^device/oneplus/udon ' || true)
+          echo "udon tree count: $UDON_COUNT"; [ "$UDON_COUNT" = "1" ] || exit 1
+          for AP in $(find device/oneplus -name AndroidProducts.mk); do
+            case "$AP" in device/oneplus/udon/AndroidProducts.mk) continue ;; esac
+            grep -qE "udon" "$AP" 2>/dev/null && sed -i -E '/udon[a-z0-9_.-]*\.mk/d; /^[[:space:]]*[a-z0-9_+-]*udon[a-z0-9_+-]*[[:space:]]*\\?$/d' "$AP" || true
+          done
+          LEFT=$(grep -rlE 'udon[a-z0-9_.-]*\.mk' device/oneplus --include=AndroidProducts.mk 2>/dev/null | grep -v 'udon/AndroidProducts' | wc -l)
+          [ "$LEFT" = "0" ] || { echo "FATAL: dup udon registration remains"; exit 1; }
+
+          echo "=== [3e] pass 1: prune dead soong namespace imports ==="
+          python3 - <<'PYEOF'
+          import os, re
+          changed = []
+          for root in ("vendor/oneplus", "device/oneplus"):
+              for dp, _, fs in os.walk(root):
+                  if "Android.bp" not in fs: continue
+                  p = os.path.join(dp, "Android.bp"); s = open(p).read()
+                  out, pos, mod = [], 0, False
+                  for m in re.finditer(r"imports:\s*\[(.*?)\]", s, re.S):
+                      kept = []
+                      for line in m.group(1).splitlines(True):
+                          mm = re.search(r'"\s*([^"\s]+)\s*"', line)
+                          if mm and not os.path.isfile(os.path.join(mm.group(1).strip().rstrip("/"), "Android.bp")):
+                              changed.append(f"{p}: pruned import {mm.group(1)}"); mod = True
+                              continue
+                          kept.append(line)
+                      out.append(s[pos:m.start(1)] + "".join(kept)); pos = m.end(1)
+                  out.append(s[pos:])
+                  if mod: open(p, "w").write("".join(out))
+          print("\n".join(changed) or "no dead imports")
+          PYEOF
+
+          echo "=== [3e] pass 2: prune A17-removed module deps (libheif) ==="
+          python3 - <<'PYEOF'
+          import os, re
+          for root in ("vendor/oneplus", "device/oneplus"):
+              for dp, _, fs in os.walk(root):
+                  if "Android.bp" not in fs: continue
+                  p = os.path.join(dp, "Android.bp"); s = open(p).read(); o = s
+                  s = re.sub(r'"libheif",\s*', "", s); s = s.replace('"libheif"', "")
+                  if s != o:
+                      open(p, "w").write(s); print(f"{p}: pruned libheif")
+          PYEOF
+
+          echo "=== [3e] pass 3: normalize mixed aidl_interface versions -> V5 ==="
+          python3 - <<'PYEOF'
+          import os, re
+          for root in ("vendor/oneplus", "device/oneplus"):
+              for dp, _, fs in os.walk(root):
+                  if "Android.bp" not in fs: continue
+                  p = os.path.join(dp, "Android.bp"); s = open(p).read(); o = s
+                  s = re.sub(r"android\.media\.audio\.common\.types-V[0-9]+", "android.media.audio.common.types-V5", s)
+                  if s != o:
+                      open(p, "w").write(s); print(f"{p}: audio.common.types -> V5")
+          PYEOF
+
+          echo "=== [3e] pass 4: kernel-header dedup (keep caf/common root-ns defs) ==="
+          python3 - <<'PYEOF'
+          import os, re
+          CAF_BP = "hardware/qcom-caf/common/Android.bp"; KROOT = "kernel/oneplus/sm8450-modules"
+          caf = set()
+          if os.path.isfile(CAF_BP):
+              caf = set(re.findall(r'cc_library_headers\s*\{\s*name:\s*"([^"]+)",\s*defaults:\s*\["generated_kernel_header_defaults"\]', open(CAF_BP).read()))
+          if not caf:
+              caf = {"audio_kernel_headers","qti_audio_kernel_uapi","qti_display_kernel_headers","qti_ipa_kernel_headers","qti_kernel_headers","smmu_proxy_uapi_header"}
+          for dp, _, fs in os.walk(KROOT):
+              if "Android.bp" not in fs: continue
+              p = os.path.join(dp, "Android.bp"); s = open(p).read()
+              out, pos, mod = [], 0, False
+              for m in re.finditer(r"cc_library_headers\s*\{", s):
+                  depth, i = 0, m.start()
+                  while i < len(s):
+                      if s[i] == "{": depth += 1
+                      elif s[i] == "}":
+                          depth -= 1
+                          if depth == 0: break
+                      i += 1
+                  block = s[m.start():i+1]
+                  nm = re.search(r'name:\s*"([^"]+)"', block)
+                  if nm and nm.group(1) in caf:
+                      print(f"{p}: stripped {nm.group(1)}"); out.append(s[pos:m.start()]); pos = i+1; mod = True
+              out.append(s[pos:])
+              if mod: open(p, "w").write("".join(out))
+          PYEOF
+
+          echo "=== [3e] pass 5: source-kernel config (wly prebuilt removal) ==="
+          python3 - <<'PYEOF'
+          import re
+          P = "device/oneplus/sm8450-common/BoardConfigCommon.mk"
+          s = open(P).read()
+          new, n = re.subn(
+              r"# Kernel\nKERNEL_PATH := device/oneplus/wly-kernel\n\n# Kernel Binary\n"
+              r"TARGET_KERNEL_VERSION := [0-9.]+\nLOCAL_KERNEL := \$\(KERNEL_PATH\)/Image\n"
+              r"PRODUCT_COPY_FILES \+= \\\n\s+\$\(LOCAL_KERNEL\):kernel\n"
+              r"TARGET_FORCE_PREBUILT_KERNEL := false\nTARGET_NO_KERNEL_OVERRIDE := false\n"
+              r"INLINE_KERNEL_BUILDING := true\nTARGET_PREBUILT_KERNEL := \$\(KERNEL_PATH\)/Image",
+              "# Kernel (source build - rocko lineage-23.2 proven)\n"
+              "TARGET_KERNEL_VERSION := 5.10\nTARGET_KERNEL_SOURCE := kernel/oneplus/sm8450\n"
+              "TARGET_KERNEL_CONFIG := gki_defconfig vendor/waipio_GKI.config vendor/oplus_GKI.config vendor/debugfs.config\n"
+              "BOARD_KERNEL_IMAGE_NAME := Image", s)
+          if n:
+              open(P, "w").write(new); print(f"wly block -> source config ({n})")
+          else:
+              out = []
+              for line in s.splitlines(True):
+                  if "wly-kernel" in line or "LOCAL_KERNEL :=" in line or "TARGET_FORCE_PREBUILT_KERNEL" in line \
+                     or "TARGET_NO_KERNEL_OVERRIDE" in line or "INLINE_KERNEL_BUILDING" in line \
+                     or "TARGET_PREBUILT_KERNEL :=" in line:
+                      out.append("# removed stale prebuilt-kernel line\n"); continue
+                  out.append(line)
+              open(P, "w").write("".join(out)); print("fallback surgical removal applied")
+          PYEOF
+
+          echo "=== [3d] derp_udon product shim ==="
+          if [ ! -f device/oneplus/udon/derp_udon.mk ]; then
+          cat > device/oneplus/udon/derp_udon.mk <<'SHIM'
+          # DerpFest 17 product (derp_udon) over rocko proven stack
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/full_base_telephony.mk)
+          $(call inherit-product, device/oneplus/udon/device.mk)
+          $(call inherit-product, vendor/derp/config/common_full_phone.mk)
+
+          PRODUCT_NAME := derp_udon
+          PRODUCT_DEVICE := udon
+          PRODUCT_MANUFACTURER := OnePlus
+          PRODUCT_BRAND := OnePlus
+          PRODUCT_MODEL := CPH2487
+          PRODUCT_SYSTEM_NAME := CPH2487
+          PRODUCT_SYSTEM_DEVICE := OP5961L1
+          PRODUCT_GMS_CLIENTID_BASE := android-oneplus
+          SHIM
+          fi
+          AP=device/oneplus/udon/AndroidProducts.mk
+          grep -q "derp_udon.mk" $AP || sed -i -e 's|$(LOCAL_DIR)/lineage_udon.mk \\|$(LOCAL_DIR)/lineage_udon.mk \\\n    $(LOCAL_DIR)/derp_udon.mk \\|' -e 's|$(LOCAL_DIR)/lineage_udon.mk$|$(LOCAL_DIR)/lineage_udon.mk \\\n    $(LOCAL_DIR)/derp_udon.mk|' $AP
+          grep -n "derp_udon" $AP
+
+      - name: Lunch derp_udon (release-config fallback chain)
+        working-directory: ${{ github.workspace }}
+        run: |
+          cd android
+          export BUILD_USERNAME=builder BUILD_HOSTNAME=gh-runner
+          source build/envsetup.sh
+          REL=""
+          for R in cp2a cp1a bp4a; do
+            [ -d "vendor/lineage/release/aconfig/$R" ] && REL=$R && break
+          done
+          [ -z "$REL" ] && REL=cp2a
+          OK=0
+          for T in "$REL" aosp_current cp1a; do
+            echo "trying lunch derp_udon-$T-userdebug"
+            if lunch "derp_udon-$T-userdebug"; then OK=1; break; fi
+          done
+          [ "$OK" = "1" ] || {
+            echo "--- diagnostics:"
+            ls build/release/release_configs 2>/dev/null | head -20
+            ls vendor/lineage/release/aconfig 2>/dev/null | head -20
+            echo "FATAL: lunch failed"; exit 1
+          }
+          echo "TARGET_PRODUCT=$TARGET_PRODUCT BUILD_ID=$BUILD_ID"
+
+      - name: Build (auto-repair loop, up to 4 attempts)
+        working-directory: ${{ github.workspace }}
+        run: |
+          cd android
+          export CCACHE_DISABLE=true
+          TRY=0; RC=1
+          set +e
+          while [ "$RC" -ne 0 ] && [ "$TRY" -le 3 ]; do
+            echo "--- mka attempt $TRY ---"
+            mka bacon -j"$(nproc --all)" > /tmp/mka_$TRY.log 2>&1
+            RC=$?
+            echo "mka attempt $TRY exit: $RC"
+            tail -25 /tmp/mka_$TRY.log
+            [ "$RC" -eq 0 ] && break
+            [ "$TRY" -eq 3 ] && break
+            python3 - /tmp/mka_$TRY.log <<'PYEOF'
+          import os, re, sys
+          log = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
+          roots = ["vendor/oneplus", "device/oneplus"]
+          actions = []
+          undef = set(re.findall(r'depends on undefined module "([A-Za-z0-9_.-]+)"', log))
+          for name in undef:
+              for root in roots:
+                  for dp, _, fs in os.walk(root):
+                      if "Android.bp" not in fs: continue
+                      p = os.path.join(dp, "Android.bp"); s = open(p).read(); o = s
+                      s = re.sub(r'"%s",\s*' % re.escape(name), "", s); s = s.replace('"%s"' % name, "")
+                      if s != o:
+                          open(p, "w").write(s); actions.append(f"{p}: pruned {name}")
+          for m in re.finditer(r'multiple versions of the same aidl_interface:\s*(\S+?)-V(\d+)-\S+,\s*(\S+?)-V(\d+)-', log):
+              base = m.group(1); vmax = max(int(m.group(2)), int(m.group(4)))
+              pat = re.escape(base) + r"-V\d+"
+              for root in roots:
+                  for dp, _, fs in os.walk(root):
+                      if "Android.bp" not in fs: continue
+                      p = os.path.join(dp, "Android.bp"); s = open(p).read(); o = s
+                      s = re.sub(pat, f"{base}-V{vmax}", s)
+                      if s != o:
+                          open(p, "w").write(s); actions.append(f"{p}: {base} -> V{vmax}")
+          print("\n".join(actions) or "no auto-fixable patterns")
+          PYEOF
+            TRY=$((TRY+1))
+          done
+          set -e
+          [ "$RC" -eq 0 ] || {
+            grep -aE "error:|FAILED:" /tmp/mka_3.log | head -40 || true
+            exit 1
+          }
+
+      - name: Acceptance + list artifacts
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          cd android
+          ls -lh out/target/product/udon/*.zip 2>/dev/null || echo "(no zip)"
+          ls -lh out/target/product/udon/boot.img out/target/product/udon/vendor_boot.img out/target/product/udon/dtbo.img 2>/dev/null || true
+          Z=$(ls out/target/product/udon/*.zip 2>/dev/null | head -1)
+          if [ -n "$Z" ]; then
+            echo "ROM_ZIP=$Z" >> "$GITHUB_ENV"
+            sha256sum "$Z"
+          fi
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DerpFest17-udon-${{ github.run_number }}
+          path: |
+            android/out/target/product/udon/*.zip
+            android/out/target/product/udon/boot.img
+            android/out/target/product/udon/vendor_boot.img
+            android/out/target/product/udon/dtbo.img
+          if-no-files-found: warn
+
+      - name: Publish GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: derpfest17-udon-${{ github.run_number }}
+          name: DerpFest 17 for OnePlus 11R (r${{ github.run_number }})
+          body: |
+            ## DerpFest 17 (AOSP 17.0.0_r1 / LOS 24.0) — OnePlus 11R (udon/CPH2487)
+            - Trees: rocko5498 proven stack (lineage-24.0 generation)
+            - Built via crave_aosp_builder (GitHub Actions)
+            - Flash: boot/vendor_boot/dtbo via fastboot, then sideload zip; FORMAT DATA when switching ROMs
+          files: |
+            android/out/target/product/udon/*.zip
+            android/out/target/product/udon/boot.img
+            android/out/target/product/udon/vendor_boot.img
+          make_latest: true
