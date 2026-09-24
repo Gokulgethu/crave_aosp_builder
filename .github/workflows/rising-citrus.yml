@@ -1,0 +1,83 @@
+name: RisingOS 16 citrus build (POCO M3)
+
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up citrus workspace identity (hostname + anchor)
+        run: |
+          sudo hostname e2b.local
+          grep -q "e2b.local" /etc/hosts || echo "127.0.0.1 e2b.local" | sudo tee -a /etc/hosts
+          echo "hostname now: $(hostname)"
+          sudo mkdir -p /home/user
+          sudo chown -R $(id -un):$(id -gn) /home/user
+          mkdir -p /home/user/citrus-roms/rising-citrus
+          cd /home/user/citrus-roms/rising-citrus
+          git init -q -b master
+          git remote add origin https://github.com/RisingOS-Revived/android
+          git config user.name "Gokulgethu"
+          git config user.email "gokulgethu30@gmail.com"
+          git commit -q --allow-empty -m "citrus anchor"
+          echo "anchor: $(git branch --show-current) @ $(git remote get-url origin)"
+
+      - name: Install crave CLI (0.2-7226)
+        run: |
+          curl -sL -o /tmp/crave https://github.com/accupara/crave/releases/download/0.2-7226/crave-0.2-7226-linux-amd64.bin
+          chmod +x /tmp/crave
+          sudo mv /tmp/crave /usr/local/bin/crave
+          crave version
+
+      - name: Configure crave
+        run: |
+          cat > ${HOME}/crave.conf <<CONFEOF
+          {
+            "username": "${CRAVE_USERNAME}",
+            "headers": {
+              "Content-Type": "application/json",
+              "Authorization": "${CRAVE_TOKEN}",
+              "User-Agent": "Crave"
+            },
+            "projects": [],
+            "server": "https://foss.crave.io/api"
+          }
+          CONFEOF
+          if grep -q '\${' ${HOME}/crave.conf; then echo "FATAL: unsubstituted placeholders"; exit 1; fi
+          python3 -c "import json; json.load(open('${HOME}/crave.conf'))" && echo "crave.conf JSON valid"
+        env:
+          CRAVE_USERNAME: ${{ secrets.CRAVE_USERNAME }}
+          CRAVE_TOKEN: ${{ secrets.CRAVE_TOKEN }}
+
+      - name: Submit RisingOS 16 citrus build to crave (detached)
+        run: |
+          cd /home/user/citrus-roms/rising-citrus
+          export CRAVE_HOME=${HOME}
+          set -o pipefail
+          crave run --detached --no-patch --artifacts "out/target/product/chime/*.zip" "$(cat ${GITHUB_WORKSPACE}/rising-citrus.sh)" 2>&1 | tee /tmp/submit.log | tail -4
+          JOBID=$(grep -oE 'build/info/[0-9]+' /tmp/submit.log | head -1 | grep -oE '[0-9]+')
+          if [ -z "$JOBID" ]; then echo "FATAL: no job id in submit output"; tail -20 /tmp/submit.log; exit 1; fi
+          echo "JOB_ID=$JOBID" >> "$GITHUB_ENV"
+          echo "RisingOS 16 citrus build submitted: $JOBID"
+
+      - name: Report job workspace (informational only)
+        run: |
+          TOKEN=$(python3 -c "import json;print(json.load(open('$HOME/crave.conf'))['headers']['Authorization'])")
+          for i in 1 2 3 4 5 6; do
+            R=$(curl -s -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" -d "{\"jobId\":${JOB_ID}}" https://foss.crave.io/api/job/v1/get)
+            if echo "$R" | python3 -c "import json,sys; sys.exit(0 if json.load(sys.stdin).get('data') else 1)" 2>/dev/null; then
+              echo "$R" | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)['data']
+          print('JOB', d['jobId'], '| status:', d['status'])
+          print('buildDir:', d['buildDir'])
+          "
+              exit 0
+            fi
+            echo "attempt $i: job record not readable yet, retrying in 10s"; sleep 10
+          done
+          echo "NOTE: verify from client side (job ${JOB_ID})"
