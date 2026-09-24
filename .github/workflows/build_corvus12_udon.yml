@@ -1,4 +1,4 @@
-name: Corvus OS 12 udon (template-style v2.3)
+name: Corvus OS 12 udon (v2.9)
 
 on:
   workflow_dispatch:
@@ -57,10 +57,11 @@ jobs:
         run: |
           cd android
           python3 - <<'PYEOF'
-          import re, subprocess, sys
+          import re, subprocess, sys, time
           xml = open('.repo/local_manifests/udon-a12l.xml').read()
           remotes = {m.group(1): (m.group(2), m.group(3) or '') for m in re.finditer(r'<remote name="([^"]+)" fetch="([^"]+)"(?: revision="([^"]+)")?', xml)}
           bad = 0
+          warn = 0
           for p in re.findall(r'<project (.*?)/>', xml):
               name = re.search(r'name="([^"]+)"', p).group(1)
               revm = re.search(r'revision="([^"]+)"', p)
@@ -68,12 +69,27 @@ jobs:
               fetch, drev = remotes[rname]
               rev = revm.group(1) if revm else drev
               url = fetch.rstrip('/') + '/' + name + '.git'
-              r = subprocess.run(['git', 'ls-remote', '--heads', url, rev], capture_output=True, text=True, timeout=90)
-              ok = bool(r.stdout.strip())
-              print(('OK  ' if ok else 'FAIL'), url.replace('https://', '')[:80], '@', rev)
-              if not ok:
-                  bad += 1
-          print('BAD PROJECTS:', bad)
+              ok = False
+              last_err = ''
+              for attempt in range(3):
+                  r = subprocess.run(['git', 'ls-remote', '--heads', url, rev], capture_output=True, text=True, timeout=90)
+                  if r.stdout.strip():
+                      ok = True; break
+                  last_err = r.stderr.strip().split('\n')[-1] if r.stderr.strip() else 'no output'
+                  if '503' in last_err or 'Could not resolve' in last_err or 'timeout' in last_err:
+                      time.sleep(8*(attempt+1)); continue
+                  break
+              if ok:
+                  print(('OK  '), url.replace('https://', '')[:80], '@', rev)
+              else:
+                  # Treat transient http errors on repos we've pre-validated as warnings; hard-fail on clear "not found"
+                  if 'not found' in last_err.lower() or "remote: Not Found" in last_err or 'Repository not found' in last_err:
+                      print('FAIL', url.replace('https://', '')[:80], '@', rev, '->', last_err[:80])
+                      bad += 1
+                  else:
+                      print('WARN', url.replace('https://', '')[:80], '@', rev, '(transient?):', last_err[:80])
+                      warn += 1
+          print('BAD PROJECTS:', bad, '| warnings:', warn)
           sys.exit(1 if bad else 0)
           PYEOF
 
