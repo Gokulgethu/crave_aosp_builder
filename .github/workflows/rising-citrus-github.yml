@@ -1,0 +1,121 @@
+name: RisingOS 16 citrus - 100% GitHub free runner (NO Crave)
+
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Runner specs (before cleanup)
+        run: |
+          echo "CPUs: $(nproc)"
+          free -h | head -2
+          df -h / 2>/dev/null; df -h /mnt 2>/dev/null || echo "(no /mnt)"
+
+      - name: Max disk cleanup
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache /usr/share/swift 2>/dev/null || true
+          sudo apt-get clean 2>/dev/null || true
+          sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+          echo "--- after cleanup ---"
+          df -h / 2>/dev/null; df -h /mnt 2>/dev/null || echo "(no /mnt)"
+
+      - name: Use /mnt overflow for out/ if it is big
+        run: |
+          MNTFREE=$(df -BG --output=avail /mnt 2>/dev/null | tail -1 | tr -dc '0-9')
+          echo "mnt_free=${MNTFREE:-0}G"
+          if [ -n "$MNTFREE" ] && [ "$MNTFREE" -gt 60 ]; then
+            mkdir -p /mnt/citrus-out
+            echo "OUT_DIR=/mnt/citrus-out" >> $GITHUB_ENV
+            echo "USING /mnt for out/ directory"
+          else
+            echo "/mnt too small or absent - out/ stays on /"
+          fi
+
+      - name: Install build deps + repo tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo -o /tmp/repo
+          chmod a+x /tmp/repo
+          sudo mv /tmp/repo /usr/local/bin/repo
+          git config --global user.name "Gokulgethu"
+          git config --global user.email "gokulgethu30@gmail.com"
+          git config --global color.ui false
+          repo --version 2>/dev/null || true
+
+      - name: repo init (sixteen-qpr2, depth-1) + citrus manifest
+        run: |
+          mkdir -p $HOME/citrus && cd $HOME/citrus
+          repo init -u https://github.com/RisingOS-Revived/android -b sixteen-qpr2 --git-lfs --depth=1
+          git clone --depth 1 https://github.com/Gokulgethu/local_manifests_citrus .repo/local_manifests
+          echo "=== citrus.xml ==="
+          cat .repo/local_manifests/citrus.xml
+
+      - name: Sync with disk-wall detection
+        run: |
+          cd $HOME/citrus
+          (repo sync -c -j4 --no-tags --no-clone-bundle --optimized-fetch > /tmp/sync.log 2>&1; echo $? > /tmp/sync.rc) &
+          SPID=$!
+          while kill -0 $SPID 2>/dev/null; do
+            sleep 60
+            FREE=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+            TREE=$(du -sBG $HOME/citrus 2>/dev/null | cut -f1 | tr -dc '0-9')
+            echo "[sync] tree=${TREE}G free_on_root=${FREE}G"
+            if [ -n "$FREE" ] && [ "$FREE" -lt 8 ]; then
+              echo "================ WALL_HIT during SYNC: tree=${TREE}G free=${FREE}G ================"
+              kill $SPID 2>/dev/null; pkill -f "repo sync" 2>/dev/null; sleep 3
+              tail -5 /tmp/sync.log || true
+              echo "SYNC_WALL=1" >> $GITHUB_ENV
+              exit 0
+            fi
+          done
+          wait $SPID || true
+          RC=$(cat /tmp/sync.rc 2>/dev/null || echo 1)
+          echo "sync finished rc=$RC tree=$(du -sh $HOME/citrus 2>/dev/null | cut -f1)"
+          if [ "$RC" != "0" ]; then
+            echo "SYNC_FAILED (rc=$RC)"
+            tail -30 /tmp/sync.log || true
+            echo "SYNC_WALL=1" >> $GITHUB_ENV
+            exit 0
+          fi
+          echo "SYNC COMPLETE"
+
+      - name: Attempt build with disk-wall detection
+        if: env.SYNC_WALL != '1'
+        run: |
+          cd $HOME/citrus
+          source build/envsetup.sh
+          lunch lineage_chime-userdebug
+          export RELAX_USES_LIBRARY_CHECK=true WITH_GMS=true
+          echo "OUT_DIR=${OUT_DIR:-(default out/)}"
+          (mka bacon > /tmp/build.log 2>&1; echo $? > /tmp/build.rc) &
+          BPID=$!
+          while kill -0 $BPID 2>/dev/null; do
+            sleep 120
+            FREEROOT=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+            OUTP="${OUT_DIR:-$HOME/citrus/out}"
+            FREEOUT=$(df -BG --output=avail "$OUTP" 2>/dev/null | tail -1 | tr -dc '0-9')
+            OUTSIZE=$(du -sBG "$OUTP" 2>/dev/null | cut -f1 | tr -dc '0-9')
+            echo "[build] out=${OUTSIZE}G free_root=${FREEROOT}G free_outfs=${FREEOUT}G"
+            if { [ -n "$FREEROOT" ] && [ "$FREEROOT" -lt 4 ]; } || { [ -n "$FREEOUT" ] && [ "$FREEOUT" -lt 4 ]; }; then
+              echo "================ WALL_HIT during BUILD: out=${OUTSIZE}G ================"
+              kill $BPID 2>/dev/null; pkill -f "mka bacon" 2>/dev/null; sleep 5
+              echo "BUILD_WALL=1" >> $GITHUB_ENV
+              exit 0
+            fi
+          done
+          wait $BPID || true
+          echo "build finished rc=$(cat /tmp/build.rc 2>/dev/null)"
+          ls -la out/target/product/chime/*.zip 2>/dev/null || ls -la "${OUT_DIR}"/target/product/chime/*.zip 2>/dev/null || echo "NO_ZIP_PRODUCED"
+          tail -20 /tmp/build.log || true
+
+      - name: Verdict
+        if: always()
+        run: |
+          echo "SYNC_WALL=${SYNC_WALL:-0} BUILD_WALL=${BUILD_WALL:-0}"
+          df -h / 2>/dev/null; df -h /mnt 2>/dev/null || true
+          du -sh $HOME/citrus 2>/dev/null || true
+          du -sh ${OUT_DIR} 2>/dev/null || true
+          find $HOME/citrus/out ${OUT_DIR} -maxdepth 4 -name "*.zip" 2>/dev/null || echo "no zip anywhere"
