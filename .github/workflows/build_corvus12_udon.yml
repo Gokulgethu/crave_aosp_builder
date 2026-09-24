@@ -111,15 +111,24 @@ jobs:
           EOF
           sed -i "s|@INH@|$INH|" device/oneplus/udon/corvus_udon.mk
 
-          # Register product in AndroidProducts.mk (idempotent) - careful to not double-add
-          grep -q 'corvus_udon.mk' device/oneplus/udon/AndroidProducts.mk || {
-            awk '
-              /\$\(LOCAL_DIR\)\/lineage_udon.mk/ && !added { print; print "    $(LOCAL_DIR)/corvus_udon.mk \\"; added=1; next }
-              /lineage_udon-userdebug/ && !added2 { print "    corvus_udon-userdebug \\"; print; added2=1; next }
-              { print }
-            ' device/oneplus/udon/AndroidProducts.mk > device/oneplus/udon/AndroidProducts.mk.new
-            mv device/oneplus/udon/AndroidProducts.mk.new device/oneplus/udon/AndroidProducts.mk
-          }
+          # Register product in AndroidProducts.mk - write canonical content cleanly
+          cat > device/oneplus/udon/AndroidProducts.mk <<'EOF'
+          #
+          # Copyright (C) 2021 The LineageOS Project
+          #
+          # SPDX-License-Identifier: Apache-2.0
+          #
+
+          PRODUCT_MAKEFILES := \
+              $(LOCAL_DIR)/lineage_udon.mk \
+              $(LOCAL_DIR)/corvus_udon.mk
+
+          COMMON_LUNCH_CHOICES := \
+              lineage_udon-user \
+              corvus_udon-userdebug \
+              lineage_udon-userdebug \
+              lineage_udon-eng
+          EOF
 
           # Swap lineage vendor inherit for corvus
           sed -i "s|vendor/lineage/config/common_full_phone.mk|$INH|" \
