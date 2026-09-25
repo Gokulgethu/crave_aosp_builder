@@ -1,4 +1,4 @@
-name: Corvus OS 12 udon (v2.12)
+name: Corvus OS 12 udon (v2.13)
 
 on:
   workflow_dispatch:
@@ -232,7 +232,7 @@ jobs:
           if [ -f "$DCIA" ]; then
             printf '%s\n' 'aidl_interface {' \
               '    name: "vendor.qti.hardware.display.config",' \
-              '    vendor: true,' \
+              '    vendor_available: true,' \
               '    srcs: [' \
               '        "vendor/qti/hardware/display/config/*.aidl",' \
               '    ],' \
@@ -241,6 +241,9 @@ jobs:
               '        "android.hardware.common-V2",' \
               '    ],' \
               '    backend: {' \
+              '        ndk: {' \
+              '            enabled: true,' \
+              '        },' \
               '        java: {' \
               '            enabled: false,' \
               '        },' \
@@ -265,6 +268,14 @@ jobs:
               cp -r "$API/5" "$API/6"
               echo "Created V6 AIDL API dir (copy of V5)"
             fi
+          fi
+          # Delete sm8450-common ndk shim entirely. On LOS20/A13 it wraps vendor.qti...-Vn-ndk into
+          # -Vn-ndk_platform because A13 Soong renames vendor variants. On A12 with vendor:true
+          # the -ndk itself is already the vendor variant, so the shim is redundant and causes
+          # "missing variant" for image:vendor.32.
+          if [ -f device/oneplus/sm8450-common/ndk/Android.bp ]; then
+            rm -f device/oneplus/sm8450-common/ndk/Android.bp
+            echo "Removed sm8450-common/ndk/Android.bp (redundant on A12L)"
           fi
           # Oplus vibrator HAL (vendor:true) links android.hardware.vibrator-V1-ndk (system variant);
           # on A12 vendor HALs must use -ndk_platform for platform AIDLs to get vendor variants.
