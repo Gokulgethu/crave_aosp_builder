@@ -93,34 +93,56 @@ jobs:
           sys.exit(1 if bad else 0)
           PYEOF
 
-      - name: "Sync sources (chunked, keep-alive)"
+      - name: "Sync sources (keep-alive, retries)"
         run: |
           cd android
-          # Sync in groups of projects with a heartbeat so GitHub hosted runner doesn't
-          # lose communication on long fetches. -j4, --fail-fast disabled on final pass.
           PATH=~/bin:$PATH
-          echo ">>> repo sync --network-only first (phase 1, fetch-only)"
-          PATH=~/bin:$PATH repo sync -c -j4 --force-sync --no-clone-bundle --no-tags \
-            --optimized-fetch --prune --fetch-submodules --network-only 2>&1 | \
-            tee /tmp/sync1.log &
-          SPID=$!
-          # heartbeat: print every 45s while sync runs
-          while kill -0 $SPID 2>/dev/null; do
-            sleep 45
-            echo "...sync phase1 still running... $(date +%H:%M:%S)"
-          done
-          wait $SPID || { echo "phase1 failed; see tail:"; tail -40 /tmp/sync1.log; }
-          df -h /
-          echo ">>> repo sync checkout phase (phase 2)"
-          PATH=~/bin:$PATH repo sync -c -l --force-sync 2>&1 | tee /tmp/sync2.log &
+          # Background sync with heartbeat to prevent hosted-runner disconnect.
+          sync_pass1() {
+            PATH=~/bin:$PATH repo sync -c -j4 --force-sync --no-clone-bundle --no-tags \
+              --optimized-fetch --prune --fail-fast > /tmp/sync1.log 2>&1
+          }
+          sync_pass1 &
           SPID=$!
           while kill -0 $SPID 2>/dev/null; do
             sleep 45
-            echo "...sync phase2 still running... $(date +%H:%M:%S)"
+            echo "...sync pass1 running... $(date +%H:%M:%S)"
           done
-          wait $SPID
-          echo ">>> verify sync"
-          PATH=~/bin:$PATH repo forall -c 'echo $REPO_PATH ok' 2>/dev/null | wc -l
+          wait $SPID; RC1=$?
+          echo ">>> pass1 exit=$RC1"
+          tail -5 /tmp/sync1.log
+          if [ $RC1 -ne 0 ]; then
+            echo ">>> retry: j2, no fail-fast, longer retries"
+            sleep 60
+            sync_pass2() {
+              for i in 1 2 3; do
+                echo "=== retry attempt $i ==="
+                PATH=~/bin:$PATH repo sync -c -j2 --force-sync --no-clone-bundle --no-tags \
+                  --optimized-fetch --prune > /tmp/sync2.log 2>&1 && return 0
+                sleep 60
+              done
+              return 1
+            }
+            sync_pass2 &
+            SPID=$!
+            while kill -0 $SPID 2>/dev/null; do
+              sleep 45
+              echo "...sync pass2 running... $(date +%H:%M:%S)"
+            done
+            wait $SPID; echo "pass2 exit=$?"
+            tail -40 /tmp/sync2.log
+          fi
+          echo ">>> critical path check"
+          MISS=0
+          for p in vendor/oneplus/sm8450-common/sm8450-common-vendor.mk \
+                   vendor/oneplus/udon \
+                   kernel/oneplus/sm8450 \
+                   hardware/oplus \
+                   vendor/lineage/build/tasks/kernel.mk \
+                   vendor/google/gms; do
+            if [ -e "$p" ]; then echo "OK  $p"; else echo "MISSING $p"; MISS=$((MISS+1)); fi
+          done
+          if [ $MISS -gt 0 ]; then echo "FATAL: $MISS critical paths missing"; exit 1; fi
           df -h /
 
       - name: "corvus_udon product shim (A12L compat + kernel engine)"
