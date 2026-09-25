@@ -1,4 +1,4 @@
-name: Corvus OS 12 udon (v2.10)
+name: Corvus OS 12 udon (v2.11)
 
 on:
   workflow_dispatch:
@@ -224,7 +224,62 @@ jobs:
           # ---- 5. GApps check ----
           ls vendor/google/gms >/dev/null 2>&1 && echo "GApps: present" || echo "WARN: GApps missing"
 
-          # ---- 6. Soong namespace fixes ----
+          # ---- 6. Fix AIDL NDK variant generation for vendor (A12L Soong quirk) ----
+          # Overwrite DCI aidl/config/Android.bp with canonical A12L-compatible content that adds
+          # vendor:true + ndk vndk.enabled + V6 (Concurrency.aidl), then create V6 aidl_api dir.
+          DCIA=vendor/qcom/opensource/display-commonsys-intf/aidl/config/Android.bp
+          if [ -f "$DCIA" ]; then
+            printf '%s\n' 'aidl_interface {' \
+              '    name: "vendor.qti.hardware.display.config",' \
+              '    vendor: true,' \
+              '    vendor_available: true,' \
+              '    srcs: [' \
+              '        "vendor/qti/hardware/display/config/*.aidl",' \
+              '    ],' \
+              '    stability: "vintf",' \
+              '    imports: [' \
+              '        "android.hardware.common-V2",' \
+              '    ],' \
+              '    backend: {' \
+              '        ndk: {' \
+              '            vndk: {' \
+              '                enabled: true,' \
+              '            },' \
+              '        },' \
+              '        java: {' \
+              '            enabled: false,' \
+              '        },' \
+              '        cpp: {' \
+              '            enabled: false,' \
+              '        },' \
+              '    },' \
+              '    versions: [' \
+              '        "1",' \
+              '        "2",' \
+              '        "3",' \
+              '        "4",' \
+              '        "5",' \
+              '        "6",' \
+              '    ],' \
+              '    owner: "qti",' \
+              '}' > "$DCIA"
+            echo "Rewrote $DCIA with vendor:true+ndk vndk+V6"
+            cat "$DCIA"
+            API=vendor/qcom/opensource/display-commonsys-intf/aidl/config/aidl_api/vendor.qti.hardware.display.config
+            if [ -d "$API/5" ] && [ ! -d "$API/6" ]; then
+              cp -r "$API/5" "$API/6"
+              echo "Created V6 AIDL API dir (copy of V5)"
+            fi
+          fi
+          # Oplus vibrator HAL (vendor:true) links android.hardware.vibrator-V1-ndk (system variant);
+          # on A12 vendor HALs must use -ndk_platform for platform AIDLs to get vendor variants.
+          VIB=hardware/oplus/aidl/vibrator/Android.bp
+          if [ -f "$VIB" ]; then
+            sed -i 's|"android.hardware.vibrator-V1-ndk"|"android.hardware.vibrator-V1-ndk_platform"|g' "$VIB"
+            echo "Patched oplus vibrator: -V1-ndk -> -V1-ndk_platform for vendor"
+          fi
+
+          # ---- 7. Soong namespace fixes ----
           # display-commonsys-intf declares its own soong_namespace{} (isolating display_intf_headers)
           # but hardware/qcom-caf/sm8450/display lives in root namespace and needs it. Flatten to root.
           DCI=vendor/qcom/opensource/display-commonsys-intf/Android.bp
