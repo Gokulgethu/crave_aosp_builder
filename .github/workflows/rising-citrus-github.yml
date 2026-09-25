@@ -55,7 +55,7 @@ jobs:
             echo "[sync] tree=${TREE}G free_on_root=${FREE}G"
             if [ -n "$FREE" ] && [ "$FREE" -lt 8 ]; then
               echo "================ WALL_HIT during SYNC: tree=${TREE}G free=${FREE}G ================"
-              kill $SPID 2>/dev/null; pkill -f "repo sync" 2>/dev/null; sleep 3
+              kill $SPID 2>/dev/null || true; pkill -f "repo sync" 2>/dev/null || true; sleep 3
               tail -5 /tmp/sync.log || true
               echo "SYNC_WALL=1" >> $GITHUB_ENV
               exit 0
