@@ -1,4 +1,4 @@
-name: Corvus OS 12 udon (v2.9)
+name: Corvus OS 12 udon (v2.10)
 
 on:
   workflow_dispatch:
@@ -51,25 +51,6 @@ jobs:
           cd android
           rm -rf .repo/local_manifests
           git clone --depth=1 https://github.com/Gokulgethu/local_manifests.git .repo/local_manifests -b main
-          git lfs install
-          # gitlab.com/AdarshGrewal vendor blobs are unreachable from GitHub runner IPs.
-          # Repoint those two projects at our own GitHub mirrors (1:1 from gitlab lineage-20).
-          # NOTE: remote must be renamed - Corvus base manifest already defines "gitlab"
-          # (snippets/corvus.xml) and a different fetch URL = "already exists with different
-          # attributes" fatal error in repo sync.
-          python3 - <<'PYX'
-          import re
-          p = '.repo/local_manifests/udon-a12l.xml'
-          x = open(p).read()
-          x = re.sub(r'<remote name="gitlab" fetch="[^"]*"\s*/>',
-                     '<remote name="gh-vendor" fetch="https://github.com/Gokulgethu" />', x)
-          x = x.replace('AdarshGrewal/', '')
-          x = x.replace('remote="gitlab"', 'remote="gh-vendor"')
-          open(p, 'w').write(x)
-          print("vendor pins now:")
-          for l in x.splitlines():
-              if 'proprietary_vendor' in l or 'gh-vendor' in l: print(" ", l.strip())
-          PYX
           cat .repo/local_manifests/udon-a12l.xml
 
       - name: "Validate manifest (30s, not 12min)"
@@ -112,45 +93,26 @@ jobs:
           sys.exit(1 if bad else 0)
           PYEOF
 
-      - name: "Sync sources (keep-alive, retries)"
+      - name: "Sync sources (keep-alive, no fail-fast)"
         run: |
           cd android
           PATH=~/bin:$PATH
-          # Background sync with heartbeat to prevent hosted-runner disconnect.
-          sync_pass1() {
-            PATH=~/bin:$PATH repo sync -c -j4 --force-sync --no-clone-bundle --no-tags \
-              --optimized-fetch --prune --fail-fast > /tmp/sync1.log 2>&1
-          }
-          sync_pass1 &
-          SPID=$!
-          while kill -0 $SPID 2>/dev/null; do
-            sleep 45
-            echo "...sync pass1 running... $(date +%H:%M:%S)"
-          done
-          RC1=0; wait $SPID || RC1=$?
+          # Heartbeat: print to stdout every 30s so the GitHub runner never sees a silent gap.
+          ( while true; do sleep 30; echo "...sync running... $(date +%H:%M:%S)"; done ) &
+          HB=$!
+          echo ">>> repo sync pass1 (no --fail-fast, j=4)"
+          PATH=~/bin:$PATH repo sync -c -j4 --force-sync --no-clone-bundle --no-tags \
+            --optimized-fetch --prune 2>&1 | tail -2000
+          RC1=${PIPESTATUS[0]}
           echo ">>> pass1 exit=$RC1"
-          tail -5 /tmp/sync1.log
           if [ $RC1 -ne 0 ]; then
-            echo ">>> retry: j2, no fail-fast, longer retries"
-            sleep 60
-            sync_pass2() {
-              for i in 1 2 3; do
-                echo "=== retry attempt $i ==="
-                PATH=~/bin:$PATH repo sync -c -j2 --force-sync --no-clone-bundle --no-tags \
-                  --optimized-fetch --prune > /tmp/sync2.log 2>&1 && return 0
-                sleep 60
-              done
-              return 1
-            }
-            sync_pass2 &
-            SPID=$!
-            while kill -0 $SPID 2>/dev/null; do
-              sleep 45
-              echo "...sync pass2 running... $(date +%H:%M:%S)"
-            done
-          RC2=0; wait $SPID || RC2=$?; echo "pass2 exit=$RC2"
-          tail -40 /tmp/sync2.log
+            echo ">>> pass2 retry: j=2, no fail-fast"
+            sleep 30
+            PATH=~/bin:$PATH repo sync -c -j2 --force-sync --no-clone-bundle --no-tags \
+              --optimized-fetch --prune 2>&1 | tail -2000
+            echo ">>> pass2 exit=${PIPESTATUS[0]}"
           fi
+          kill $HB 2>/dev/null
           echo ">>> critical path check"
           MISS=0
           for p in vendor/oneplus/sm8450-common/sm8450-common-vendor.mk \
