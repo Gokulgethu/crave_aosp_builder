@@ -1,4 +1,4 @@
-name: Corvus OS 12 udon (v2.13)
+name: Corvus OS 12 udon (v2.14)
 
 on:
   workflow_dispatch:
@@ -297,6 +297,16 @@ jobs:
             printf 'cc_defaults { name: "gralloc_handle_has_custom_content_md_reserved_size_defaults", }\n' >> "$DCI"
             echo "Flattened display-commonsys-intf into root soong namespace + gralloc defaults stubs"
           fi
+
+          # ---- 8. Stub missing LOS livedisplay@2.0-sdm headers (not shipped on Corvus 12) ----
+          # oplus livedisplay 2.1 service links vendor.lineage.livedisplay@2.0-sdm-headers which
+          # lives in LOS hardware/lineage/interfaces (livedisplay/2.0/SdmController). Provide an
+          # empty cc_library_headers stub so the service links.
+          if ! grep -qr 'name: "vendor.lineage.livedisplay@2.0-sdm-headers"' hardware/ vendor/ device/ 2>/dev/null; then
+            printf '\ncc_library_headers {\n    name: "vendor.lineage.livedisplay@2.0-sdm-headers",\n    vendor_available: true,\n    export_include_dirs: [],\n}\n' >> hardware/oplus/hidl/livedisplay/Android.bp
+            echo "Stubbed vendor.lineage.livedisplay@2.0-sdm-headers"
+          fi
+
           # Append missing namespaces to PRODUCT_SOONG_NAMESPACES
           for ns in vendor/qcom/opensource/display-commonsys-intf packages/resources/devicesettings hardware/oplus; do
             if ! grep -qr "PRODUCT_SOONG_NAMESPACES.*$ns" device/oneplus/sm8450-common device/oneplus/udon vendor/oneplus 2>/dev/null; then
