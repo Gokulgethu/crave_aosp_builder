@@ -51,6 +51,21 @@ jobs:
           cd android
           rm -rf .repo/local_manifests
           git clone --depth=1 https://github.com/Gokulgethu/local_manifests.git .repo/local_manifests -b main
+          git lfs install
+          # gitlab.com/AdarshGrewal vendor blobs are unreachable from GitHub runner IPs.
+          # Repoint those two projects at our own GitHub mirrors (1:1 from gitlab lineage-20).
+          python3 - <<'PYX'
+          import re
+          p = '.repo/local_manifests/udon-a12l.xml'
+          x = open(p).read()
+          x = re.sub(r'<remote name="gitlab" fetch="[^"]*"\s*/>',
+                     '<remote name="gitlab" fetch="https://github.com/Gokulgethu" />', x)
+          x = x.replace('AdarshGrewal/', '')
+          open(p, 'w').write(x)
+          print("vendor pins now:")
+          for l in x.splitlines():
+              if 'proprietary_vendor' in l: print(" ", l.strip())
+          PYX
           cat .repo/local_manifests/udon-a12l.xml
 
       - name: "Validate manifest (30s, not 12min)"
